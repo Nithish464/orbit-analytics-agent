@@ -1,0 +1,12 @@
+services:
+  api:
+    build: ./backend
+    ports: ["8000:8000"]
+    environment: [ORBIT_DB_PATH=/data/orbit.db]
+    volumes: [orbit_data:/data]
+  web:
+    build: ./frontend
+    ports: ["5173:80"]
+    depends_on: [api]
+volumes:
+  orbit_data:
