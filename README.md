@@ -1,10 +1,10 @@
 # ORBIT Analytics Agent
 
-**An AI-powered analytics interface for querying business data using natural language.**
+**A natural-language analytics platform for querying business data and generating interactive insights.**
 
-ORBIT Analytics Agent is a full-stack analytics application that allows users to ask business questions in natural language and receive structured results, visualizations, and generated SQL queries.
+ORBIT Analytics Agent is a full-stack analytics application that enables users to ask business questions in natural language and receive structured results, visualizations, and generated SQL queries.
 
-Instead of manually writing SQL queries, users can interact with their data through a conversational analytics interface.
+Instead of manually writing SQL queries, users can explore business data through a conversational analytics interface.
 
 ---
 
@@ -19,20 +19,20 @@ Users can ask questions such as:
 - Which are the top 5 products by revenue?
 - How many orders are there by status?
 
-The application processes the question, identifies the relevant analytics operation, generates an approved SQL query, executes it against the database, and displays the results.
+The application processes supported questions, identifies the relevant analytics operation, generates an approved SQL query, executes it against the database, and displays the results.
 
 ## Features
 
 - **Natural Language Analytics** – Ask business questions using everyday language.
-- **Automated SQL Generation** – Generate SQL queries based on supported analytics questions.
-- **Interactive Visualizations** – Display results using charts and graphs.
-- **KPI Metrics** – Present important business metrics in a clear format.
+- **Automated SQL Generation** – Generate SQL queries for supported analytics questions.
+- **Interactive Visualizations** – Explore results through charts and graphs.
+- **KPI Metrics** – Display important business metrics.
 - **Data Source Explorer** – Inspect database tables and schema information.
 - **SQL Explorer** – View and copy generated SQL queries.
 - **Query History** – Access previous analytics requests.
-- **CSV Export** – Export query results for further analysis.
+- **CSV Export** – Export query results.
 - **SQL Validation** – Apply read-only query validation before execution.
-- **Agent Execution Trace** – Display the workflow followed to process a query.
+- **Agent Execution Trace** – View the workflow used to process a query.
 
 ## Tech Stack
 
@@ -46,57 +46,56 @@ The application processes the question, identifies the relevant analytics operat
 | Database | SQLite |
 | API | REST API |
 | Server | Uvicorn |
+| Containerization | Docker, Docker Compose |
 
 ## Architecture
 
 ```text
-                 USER
-                   |
-                   v
-          React Analytics UI
-                   |
-                   v
-             FastAPI API
-                   |
-                   v
-          Analytics Workflow
-                   |
-          +--------+--------+
-          |        |        |
-          v        v        v
+                  USER
+                    |
+                    v
+           React Analytics UI
+                    |
+                    v
+               FastAPI API
+                    |
+                    v
+           Analytics Workflow
+                    |
+          +---------+---------+
+          |         |         |
+          v         v         v
        Planner  SQL Safety  Executor
-          |        |        |
-          +--------+--------+
-                   |
-                   v
+          |         |         |
+          +---------+---------+
+                    |
+                    v
              SQLite Database
-                   |
-                   v
-          Results & Visualizations
-                   |
-                   v
+                    |
+                    v
+         Results & Visualizations
+                    |
+                    v
              React Dashboard
 ```
 
 ## Project Structure
 
 ```text
-ORBIT/
+orbit-analytics-agent/
+│
+├── .github/
+│   └── workflows/
 │
 ├── backend/
-│   └── app/
-│       ├── main.py
-│       ├── agents.py
-│       └── security.py
 │
 ├── frontend/
-│   ├── src/
-│   │   ├── App.tsx
-│   │   ├── main.tsx
-│   │   └── styles.css
-│   ├── package.json
-│   └── index.html
 │
+├── docs/
+│
+├── .env.example
+├── .gitignore
+├── docker-compose.yml
 └── README.md
 ```
 
@@ -104,17 +103,16 @@ ORBIT/
 
 ### Prerequisites
 
-Make sure you have installed:
-
 - Python 3.10+
 - Node.js 20+
 - npm
+- Git
 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/Nithish464/ORBIT.git
-cd ORBIT
+git clone https://github.com/Nithish464/orbit-analytics-agent.git
+cd orbit-analytics-agent
 ```
 
 ### 2. Start the Backend
@@ -169,7 +167,7 @@ http://127.0.0.1:8000/api/health
 
 ### 3. Start the Frontend
 
-Open another terminal:
+Open another terminal from the project root:
 
 ```bash
 cd frontend
@@ -215,11 +213,9 @@ The demo warehouse contains four tables:
 | orders | Order transactions |
 | order_items | Individual items within orders |
 
-The analytics workflow uses these tables to answer supported business questions.
-
 ## Security
 
-ORBIT includes a read-only SQL validation layer designed to reduce unsafe query execution.
+ORBIT includes an application-level read-only SQL validation layer designed to reduce unsafe query execution.
 
 Current safeguards include:
 
@@ -229,22 +225,22 @@ Current safeguards include:
 - Query comment and multiple-statement checks.
 - Query result limits.
 
-**Note:** These are application-level safeguards for the demo project, not a guarantee of production-grade SQL security. Production deployment should additionally use database-level read-only permissions and robust SQL parsing.
+**Note:** These safeguards are designed for the demonstration project and do not guarantee production-grade SQL security. Production deployments should additionally use database-level read-only permissions and robust SQL parsing.
 
 ## Current Implementation
 
 The current version uses a deterministic analytics workflow with predefined query-planning logic and approved SQL patterns.
 
-It demonstrates a natural-language analytics experience, but it is not yet a fully autonomous LLM-powered analytics agent.
+It demonstrates a natural-language analytics experience but is not yet a fully autonomous LLM-powered analytics agent.
 
 ## Future Improvements
 
 - Integrate an LLM-powered query planning system.
 - Support additional database connectors.
-- Add user authentication and role-based access.
+- Add authentication and role-based access control.
 - Improve SQL parsing and database-level security.
 - Add advanced analytics and forecasting.
-- Deploy the application with production monitoring.
+- Deploy with production monitoring.
 - Add automated frontend and API integration tests.
 
 ## Author
@@ -252,6 +248,7 @@ It demonstrates a natural-language analytics experience, but it is not yet a ful
 **Nithishkumar K**
 
 - GitHub: [Nithish464](https://github.com/Nithish464)
+- Repository: [ORBIT Analytics Agent](https://github.com/Nithish464/orbit-analytics-agent)
 
 ---
 
