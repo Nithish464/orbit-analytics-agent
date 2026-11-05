@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .database import initialize_database, get_schema
 from .schemas import AskRequest
 from .agents import execute_workflow, EXAMPLES
+from .auth_routes import router as auth_router
 from .ollama_client import check_ollama, close_ollama_client
 
 
@@ -152,6 +153,10 @@ async def lifespan(app: FastAPI):
             )
 
 
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
+
 app = FastAPI(
     title="ORBIT Analytics Agent API",
     description=(
@@ -161,6 +166,10 @@ app = FastAPI(
     version="1.3.0",
     lifespan=lifespan,
 )
+
+
+# Register authentication endpoints.
+app.include_router(auth_router)
 
 
 # ============================================================
@@ -188,7 +197,11 @@ app.add_middleware(
     allow_origins=_allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Accept"],
+    allow_headers=[
+        "Content-Type",
+        "Accept",
+        "Authorization",
+    ],
 )
 
 
@@ -376,6 +389,7 @@ def root():
         "health": "/api/health",
         "ai_health": "/api/ai/health",
         "performance": "/api/performance",
+        "authentication": "/api/auth",
     }
 
 

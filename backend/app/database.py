@@ -14,6 +14,8 @@ DB_PATH = Path(
 )
 
 
+# Tables accessible through the analytics SQL agent.
+# IMPORTANT: Keep the authentication users table out of this allowlist.
 SCHEMA = {
     "customers": [
         "customer_id",
@@ -44,7 +46,7 @@ SCHEMA = {
 }
 
 
-# SQLite operations permitted during read-only queries.
+# SQLite operations permitted during read-only analytics queries.
 READ_ONLY_ACTIONS = {
     sqlite3.SQLITE_SELECT,
     sqlite3.SQLITE_READ,
@@ -75,7 +77,7 @@ def _readonly_authorizer(
     """
     SQLite-level authorization for read-only connections.
 
-    Only SELECT, READ and approved function operations
+    Only approved SELECT, READ and function operations
     are permitted.
     """
 
@@ -105,9 +107,6 @@ def _configure_query_timeout(
 
     A fresh deadline is created whenever SQLite starts
     executing a new statement.
-
-    The progress handler interrupts a query when its
-    execution exceeds QUERY_TIMEOUT_SECONDS.
     """
 
     query_deadline = [0.0]
@@ -137,12 +136,11 @@ def get_connection(
     """
     Create a SQLite connection.
 
-    Writable connections are used only for initialization
-    and database maintenance.
+    Writable connections are used for initialization,
+    authentication and database maintenance.
 
-    Read-only connections require an existing database file,
-    enable query_only mode, install a SQLite authorizer,
-    and enforce a query execution timeout.
+    Read-only connections are restricted to approved
+    analytics tables and enforce query timeouts.
     """
 
     resolved_path = DB_PATH.resolve()
@@ -183,7 +181,6 @@ def get_connection(
         if readonly:
             connection.execute("PRAGMA query_only = ON")
             connection.set_authorizer(_readonly_authorizer)
-
             _configure_query_timeout(connection)
 
         return connection
@@ -198,9 +195,6 @@ def _create_performance_indexes(
 ) -> None:
     """
     Create indexes for frequently used ORBIT query patterns.
-
-    These indexes support JOIN operations and the year
-    expression used by the deterministic SQL builder.
     """
 
     cursor.executescript(
@@ -220,10 +214,44 @@ def _create_performance_indexes(
     )
 
 
+def _create_authentication_table(
+    cursor: sqlite3.Cursor,
+) -> None:
+    """
+    Create the authentication users table.
+
+    Passwords must be stored as secure password hashes,
+    never as plaintext.
+
+    This table is deliberately excluded from the analytics
+    SQL allowlist.
+    """
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user'
+                CHECK (role IN ('admin', 'user')),
+            is_active INTEGER NOT NULL DEFAULT 1
+                CHECK (is_active IN (0, 1)),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
 def initialize_database() -> None:
     """
-    Initialize the ORBIT analytics database, create performance
-    indexes and insert demo data when the customers table is empty.
+    Initialize the ORBIT database.
+
+    Creates:
+    - Analytics tables
+    - Authentication users table
+    - Performance indexes
+    - Demo analytics data when necessary
     """
 
     conn = get_connection(readonly=False)
@@ -271,7 +299,10 @@ def initialize_database() -> None:
             """
         )
 
-        # Create indexes after ensuring that all tables exist.
+        # Authentication table is separate from analytics SCHEMA.
+        _create_authentication_table(cur)
+
+        # Create analytics performance indexes.
         _create_performance_indexes(cur)
 
         customer_count = cur.execute(
@@ -388,10 +419,9 @@ def initialize_database() -> None:
                 items,
             )
 
-        # Persist demo data and index definitions.
         conn.commit()
 
-        # Ask SQLite to update its query-planner statistics.
+        # Update SQLite query planner statistics.
         conn.execute("PRAGMA optimize")
 
     except Exception:
@@ -404,10 +434,9 @@ def initialize_database() -> None:
 
 def get_schema() -> list[dict]:
     """
-    Return the approved ORBIT database schema.
+    Return the approved analytics database schema.
 
-    This uses the in-memory schema definition and does not
-    open a database connection.
+    Authentication tables are intentionally excluded.
     """
 
     return [
