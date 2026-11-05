@@ -1,3 +1,4 @@
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -96,3 +97,51 @@ def test_successful_analysis_returns_http_200(monkeypatch):
     assert response.json() == expected_result
     assert response.json()["answer"] == "Total revenue is $150,000."
     assert response.json()["row_count"] == 1
+
+
+def test_rate_limit_returns_http_429(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "rate_limiter",
+        main.InMemoryRateLimiter(
+            max_requests=1,
+            window_seconds=60,
+        ),
+    )
+
+    def mock_success(question):
+        return {
+            "question": question,
+            "answer": "Total revenue is $150,000.",
+            "sql": "SELECT 1 LIMIT 100",
+            "columns": ["revenue"],
+            "rows": [{"revenue": 150000}],
+            "row_count": 1,
+            "chart": None,
+            "steps": [],
+            "duration_ms": 10.0,
+            "mode": "deterministic-demo",
+        }
+
+    monkeypatch.setattr(
+        main,
+        "execute_workflow",
+        mock_success,
+    )
+
+    payload = {
+        "question": "What is our total revenue?"
+    }
+
+    first_response = client.post("/api/ask", json=payload)
+    second_response = client.post("/api/ask", json=payload)
+
+    assert first_response.status_code == 200
+
+    assert second_response.status_code == 429
+    assert second_response.json()["detail"] == (
+        "Too many requests. Please try again later."
+    )
+
+    assert second_response.headers["retry-after"] == "60"
+    assert second_response.headers["x-ratelimit-remaining"] == "0"

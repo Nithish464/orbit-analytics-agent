@@ -2,11 +2,13 @@
 import logging
 import os
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from math import ceil
 from threading import Lock
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import initialize_database, get_schema
@@ -16,6 +18,113 @@ from .ollama_client import check_ollama, close_ollama_client
 
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# RATE LIMITING CONFIGURATION
+# ============================================================
+
+RATE_LIMIT_REQUESTS = int(
+    os.getenv("ORBIT_RATE_LIMIT_REQUESTS", "20")
+)
+
+RATE_LIMIT_WINDOW_SECONDS = float(
+    os.getenv("ORBIT_RATE_LIMIT_WINDOW_SECONDS", "60")
+)
+
+MAX_TRACKED_CLIENTS = 10000
+
+
+class InMemoryRateLimiter:
+    """Thread-safe, per-client sliding-window rate limiter."""
+
+    def __init__(
+        self,
+        max_requests: int,
+        window_seconds: float,
+    ):
+        if max_requests < 1:
+            raise ValueError("Rate limit must be at least 1.")
+
+        if window_seconds <= 0:
+            raise ValueError("Rate limit window must be positive.")
+
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._requests: dict[str, deque[float]] = {}
+        self._lock = Lock()
+
+    def is_allowed(
+        self,
+        client_id: str,
+    ) -> tuple[bool, int, int]:
+        now = time.monotonic()
+
+        with self._lock:
+            bucket = self._requests.get(client_id)
+
+            if bucket is None:
+                if len(self._requests) >= MAX_TRACKED_CLIENTS:
+                    self._remove_expired_clients(now)
+
+                if len(self._requests) >= MAX_TRACKED_CLIENTS:
+                    return False, 1, 0
+
+                bucket = deque()
+                self._requests[client_id] = bucket
+
+            while (
+                bucket
+                and now - bucket[0] >= self.window_seconds
+            ):
+                bucket.popleft()
+
+            if len(bucket) >= self.max_requests:
+                retry_after = max(
+                    1,
+                    ceil(
+                        self.window_seconds
+                        - (now - bucket[0])
+                    ),
+                )
+
+                return False, retry_after, 0
+
+            bucket.append(now)
+
+            remaining = self.max_requests - len(bucket)
+
+            return True, 0, remaining
+
+    def _remove_expired_clients(self, now: float) -> None:
+        """Remove inactive clients when the tracking limit is reached."""
+
+        expired_clients = [
+            client_id
+            for client_id, timestamps in self._requests.items()
+            if (
+                not timestamps
+                or now - timestamps[-1] >= self.window_seconds
+            )
+        ]
+
+        for client_id in expired_clients:
+            self._requests.pop(client_id, None)
+
+
+rate_limiter = InMemoryRateLimiter(
+    max_requests=RATE_LIMIT_REQUESTS,
+    window_seconds=RATE_LIMIT_WINDOW_SECONDS,
+)
+
+
+def _get_client_identifier(request: Request) -> str:
+    """Get the direct client IP without trusting forwarded headers."""
+
+    if request.client is None:
+        return "unknown"
+
+    return request.client.host
 
 
 # ============================================================
@@ -343,8 +452,39 @@ def performance():
 # ============================================================
 
 @app.post("/api/ask")
-def ask(req: AskRequest):
-    """Accept and execute a natural-language analytics question."""
+def ask(
+    req: AskRequest,
+    request: Request,
+    response: Response,
+):
+    """Accept and execute a rate-limited analytics question."""
+
+    client_id = _get_client_identifier(request)
+
+    allowed, retry_after, remaining = rate_limiter.is_allowed(
+        client_id
+    )
+
+    if not allowed:
+        logger.warning(
+            "Rate limit exceeded for client %s.",
+            client_id,
+        )
+
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests. Please try again later.",
+            headers={
+                "Retry-After": str(retry_after),
+                "X-RateLimit-Limit": str(RATE_LIMIT_REQUESTS),
+                "X-RateLimit-Remaining": "0",
+            },
+        )
+
+    response.headers["X-RateLimit-Limit"] = str(
+        RATE_LIMIT_REQUESTS
+    )
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
 
     request_started = time.perf_counter()
     question = req.question.strip()
