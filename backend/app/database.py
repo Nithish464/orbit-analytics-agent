@@ -1,6 +1,7 @@
 
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -59,6 +60,11 @@ BLOCKED_FUNCTIONS = {
 }
 
 
+# SQL execution timeout configuration.
+QUERY_TIMEOUT_SECONDS = 5.0
+SQLITE_PROGRESS_OPCODES = 1000
+
+
 def _readonly_authorizer(
     action: int,
     arg1: Optional[str],
@@ -91,6 +97,40 @@ def _readonly_authorizer(
     return sqlite3.SQLITE_OK
 
 
+def _configure_query_timeout(
+    connection: sqlite3.Connection,
+) -> None:
+    """
+    Configure a per-statement execution timeout.
+
+    A fresh deadline is created whenever SQLite starts
+    executing a new statement.
+
+    The progress handler interrupts a query when its
+    execution exceeds QUERY_TIMEOUT_SECONDS.
+    """
+
+    query_deadline = [0.0]
+
+    def reset_query_deadline(sql: str) -> None:
+        query_deadline[0] = (
+            time.monotonic() + QUERY_TIMEOUT_SECONDS
+        )
+
+    def check_query_timeout() -> int:
+        if time.monotonic() >= query_deadline[0]:
+            return 1
+
+        return 0
+
+    connection.set_trace_callback(reset_query_deadline)
+
+    connection.set_progress_handler(
+        check_query_timeout,
+        SQLITE_PROGRESS_OPCODES,
+    )
+
+
 def get_connection(
     readonly: bool = False,
 ) -> sqlite3.Connection:
@@ -101,7 +141,8 @@ def get_connection(
     and database maintenance.
 
     Read-only connections require an existing database file,
-    enable query_only mode and install a SQLite authorizer.
+    enable query_only mode, install a SQLite authorizer,
+    and enforce a query execution timeout.
     """
 
     resolved_path = DB_PATH.resolve()
@@ -142,6 +183,8 @@ def get_connection(
         if readonly:
             connection.execute("PRAGMA query_only = ON")
             connection.set_authorizer(_readonly_authorizer)
+
+            _configure_query_timeout(connection)
 
         return connection
 

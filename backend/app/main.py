@@ -2,6 +2,7 @@
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from threading import Lock
 
@@ -17,6 +18,31 @@ from .ollama_client import check_ollama, close_ollama_client
 logger = logging.getLogger(__name__)
 
 
+# ============================================================
+# APPLICATION LIFESPAN
+# ============================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application startup and shutdown resources."""
+
+    initialize_database()
+    logger.info("ORBIT API startup completed.")
+
+    try:
+        yield
+
+    finally:
+        try:
+            close_ollama_client()
+            logger.info("Ollama HTTP client closed successfully.")
+
+        except Exception:
+            logger.exception(
+                "Failed to close the Ollama HTTP client."
+            )
+
+
 app = FastAPI(
     title="ORBIT Analytics Agent API",
     description=(
@@ -24,6 +50,7 @@ app = FastAPI(
         "with read-only SQL execution and local AI support."
     ),
     version="1.3.0",
+    lifespan=lifespan,
 )
 
 
@@ -93,8 +120,6 @@ def _record_performance(
 
     cache_hit = result.get("cache_hit")
 
-    # Count a cache miss only when AI generation was attempted.
-    # Deterministic fallback and skipped AI are not cache misses.
     ai_attempted = (
         isinstance(ai_duration, (int, float))
         and ai_duration > 0
@@ -120,9 +145,7 @@ def _record_performance(
         _performance_records.append(record)
 
         if len(_performance_records) > MAX_PERFORMANCE_RECORDS:
-            del _performance_records[
-                :-MAX_PERFORMANCE_RECORDS
-            ]
+            del _performance_records[:-MAX_PERFORMANCE_RECORDS]
 
 
 def _average(values: list[float]) -> float:
@@ -230,33 +253,6 @@ def get_performance_snapshot() -> dict:
         "max_sample_size": MAX_PERFORMANCE_RECORDS,
         "trend": records[-PERFORMANCE_TREND_ITEMS:],
     }
-
-
-# ============================================================
-# APPLICATION LIFECYCLE
-# ============================================================
-
-@app.on_event("startup")
-def startup():
-    """Initialize the database when the API starts."""
-
-    initialize_database()
-
-    logger.info("ORBIT API startup completed.")
-
-
-@app.on_event("shutdown")
-def shutdown():
-    """Close reusable HTTP resources during application shutdown."""
-
-    try:
-        close_ollama_client()
-        logger.info("Ollama HTTP client closed successfully.")
-
-    except Exception:
-        logger.exception(
-            "Failed to close the Ollama HTTP client."
-        )
 
 
 # ============================================================
@@ -385,6 +381,26 @@ def ask(req: AskRequest):
         )
 
         return result
+
+    except TimeoutError as error:
+        api_duration_ms = (
+            time.perf_counter() - request_started
+        ) * 1000
+
+        _record_performance(
+            status="error",
+            api_duration_ms=api_duration_ms,
+        )
+
+        logger.warning(
+            "ORBIT SQL query timed out: %s",
+            error,
+        )
+
+        raise HTTPException(
+            status_code=408,
+            detail=str(error),
+        ) from error
 
     except ValueError as error:
         api_duration_ms = (
