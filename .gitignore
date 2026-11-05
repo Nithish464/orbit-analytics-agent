@@ -6,3 +6,11 @@ node_modules/
 dist/
 .env
 *.db
+.env.*
+!.env.example
+*.log
+coverage/
+playwright-report/
+test-results/
+orbit-analytics-agent/
+frontend/tsconfig.tsbuildinfo

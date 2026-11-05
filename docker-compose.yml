@@ -1,12 +1,29 @@
 services:
   api:
     build: ./backend
-    ports: ["8000:8000"]
-    environment: [ORBIT_DB_PATH=/data/orbit.db]
-    volumes: [orbit_data:/data]
+    environment:
+      ORBIT_DB_PATH: /data/orbit.db
+      ORBIT_CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    volumes:
+      - orbit_data:/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
   web:
     build: ./frontend
-    ports: ["5173:80"]
-    depends_on: [api]
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   orbit_data:

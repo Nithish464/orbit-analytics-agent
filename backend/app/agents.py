@@ -1,10 +1,15 @@
 
 import re
 import time
+import sqlite3
 from typing import Any
 
 from .database import get_connection
-from .security import validate_question_intent, validate_readonly_sql
+from .security import (
+    validate_question_intent,
+    validate_readonly_sql,
+)
+from .ollama_client import generate_business_insight
 
 
 EXAMPLES = [
@@ -20,6 +25,9 @@ EXAMPLES = [
     "Which product generates the highest revenue?",
 ]
 
+QUERY_TIMEOUT_SECONDS = 5.0
+MAX_QUERY_ROWS = 100
+
 
 def plan_question(question: str) -> dict[str, Any]:
     """Convert a supported analytics question into a deterministic query plan."""
@@ -31,7 +39,7 @@ def plan_question(question: str) -> dict[str, Any]:
 
     limit_match = re.search(r"\btop\s+(\d+)\b", q)
     limit = int(limit_match.group(1)) if limit_match else 10
-    limit = max(1, min(limit, 100))
+    limit = max(1, min(limit, MAX_QUERY_ROWS))
 
     singular_highest = (
         any(
@@ -274,21 +282,34 @@ def build_sql(plan: dict[str, Any]) -> str:
 
 def run_query(
     sql: str,
+    timeout_seconds: float = QUERY_TIMEOUT_SECONDS,
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    """Validate and execute a read-only SQL query."""
+    """Validate and execute read-only SQL with a query timeout."""
 
-    # IMPORTANT: validator returns (is_valid, validated_sql_or_error).
+    if timeout_seconds <= 0:
+        raise ValueError("Query timeout must be greater than zero.")
+
     is_valid, validation_result = validate_readonly_sql(sql)
 
     if not is_valid:
         raise ValueError(str(validation_result))
 
     safe_sql = validation_result
-
-    connection = get_connection(readonly=True)
+    connection = None
 
     try:
-        connection.execute("PRAGMA query_only = ON")
+        connection = get_connection(readonly=True)
+
+        start_time = time.monotonic()
+
+        def query_timeout() -> int:
+            elapsed = time.monotonic() - start_time
+            return int(elapsed >= timeout_seconds)
+
+        connection.set_progress_handler(
+            query_timeout,
+            1000,
+        )
 
         cursor = connection.execute(safe_sql)
 
@@ -297,13 +318,23 @@ def run_query(
             for description in (cursor.description or [])
         ]
 
-        fetched_rows = cursor.fetchmany(100)
+        fetched_rows = cursor.fetchmany(MAX_QUERY_ROWS)
         rows = [dict(row) for row in fetched_rows]
 
         return columns, rows
 
+    except sqlite3.OperationalError as error:
+        if "interrupted" in str(error).lower():
+            raise TimeoutError(
+                f"Query execution exceeded {timeout_seconds} seconds."
+            ) from error
+
+        raise
+
     finally:
-        connection.close()
+        if connection is not None:
+            connection.set_progress_handler(None, 0)
+            connection.close()
 
 
 def make_chart(
@@ -371,9 +402,20 @@ def make_answer(
     plan: dict[str, Any],
     rows: list[dict[str, Any]],
 ) -> str:
-    """Generate business insights from query results."""
+    """Generate deterministic business insights from query results."""
 
-    if not rows:
+    if not rows or all(
+        value is None
+        for row in rows
+        for value in row.values()
+    ):
+        year = plan.get("year")
+
+        if year:
+            return (
+                f"No matching records were found for the year {year}."
+            )
+
         return "No matching records were found for this question."
 
     metric = plan["metric"]
@@ -382,7 +424,12 @@ def make_answer(
 
     # Total revenue.
     if metric == "revenue" and dimension == "none":
-        value = first.get("total_revenue", 0)
+        value = first.get("total_revenue")
+
+        if value is None:
+            return (
+                "No revenue records were found for the selected period."
+            )
 
         return (
             f"Total recorded revenue is {_money(value)} "
@@ -391,15 +438,25 @@ def make_answer(
 
     # Average order value.
     if metric == "aov":
-        value = first.get("average_order_value", 0)
+        value = first.get("average_order_value")
 
-        return (
-            f"The average order value is {_money(value)}."
-        )
+        if value is None:
+            return (
+                "Average order value could not be calculated because "
+                "no matching orders were found."
+            )
+
+        return f"The average order value is {_money(value)}."
 
     # Average revenue per order.
     if metric == "average_revenue":
-        value = first.get("average_revenue_per_order", 0)
+        value = first.get("average_revenue_per_order")
+
+        if value is None:
+            return (
+                "Average revenue per order could not be calculated "
+                "because no matching orders were found."
+            )
 
         return (
             f"Average revenue per order is {_money(value)}. "
@@ -453,11 +510,11 @@ def make_answer(
     # Revenue by region.
     if metric == "revenue" and dimension == "region":
         total = sum(
-            float(row.get("revenue", 0))
+            float(row.get("revenue") or 0)
             for row in rows
         )
 
-        highest = float(first.get("revenue", 0))
+        highest = float(first.get("revenue") or 0)
         percentage = highest / total * 100 if total else 0
 
         return (
@@ -469,7 +526,7 @@ def make_answer(
     # Monthly revenue.
     if metric == "revenue" and dimension == "month":
         values = [
-            float(row.get("revenue", 0))
+            float(row.get("revenue") or 0)
             for row in rows
         ]
 
@@ -478,7 +535,7 @@ def make_answer(
         winners = [
             row["month"]
             for row in rows
-            if float(row.get("revenue", 0)) == highest
+            if float(row.get("revenue") or 0) == highest
         ]
 
         if len(winners) == 1:
@@ -497,16 +554,16 @@ def make_answer(
     # Orders by status.
     if metric == "orders" and dimension == "status":
         total = sum(
-            int(row.get("order_count", 0))
+            int(row.get("order_count") or 0)
             for row in rows
         )
 
-        highest = int(first.get("order_count", 0))
+        highest = int(first.get("order_count") or 0)
 
         winners = [
             row["status"]
             for row in rows
-            if int(row.get("order_count", 0)) == highest
+            if int(row.get("order_count") or 0) == highest
         ]
 
         percentage = highest / total * 100 if total else 0
@@ -515,7 +572,7 @@ def make_answer(
             return (
                 f"{first['status'].capitalize()} is the most common "
                 f"order status with {highest} orders "
-                f"({percentage:.1f}% of all returned orders)."
+                f"({percentage:.1f}% of all orders)."
             )
 
         return (
@@ -547,8 +604,7 @@ def make_answer(
 
         return (
             f"The highest monthly order count was {highest}, "
-            f"tied across {len(winners)} months. "
-            f"Returned {len(rows)} monthly data points."
+            f"tied across {len(winners)} months."
         )
 
     # Total order count.
@@ -560,8 +616,11 @@ def make_answer(
 
     # General overview.
     if metric == "overview":
-        revenue = first.get("total_revenue", 0)
-        orders = first.get("total_orders", 0)
+        revenue = first.get("total_revenue")
+        orders = first.get("total_orders")
+
+        if revenue is None or orders is None:
+            return "No matching records were found for this question."
 
         return (
             f"Dataset overview: total revenue is {_money(revenue)} "
@@ -574,94 +633,219 @@ def make_answer(
 
 
 def execute_workflow(question: str) -> dict[str, Any]:
-    """Execute the ORBIT deterministic analytics workflow."""
+    """Execute the ORBIT analytics workflow with performance metrics."""
 
-    start_time = time.perf_counter()
+    workflow_start = time.perf_counter()
     steps = []
 
-    try:
-        # Step 1: Validate question.
-        validate_question_intent(question)
+    # Step 1: Validate question and create plan.
+    planner_start = time.perf_counter()
 
-        plan = plan_question(question)
+    validate_question_intent(question)
+    plan = plan_question(question)
 
-        steps.append({
-            "name": "Planner",
-            "status": "complete",
-            "detail": (
-                f"Detected metric={plan['metric']}, "
-                f"dimension={plan['dimension']}."
-            ),
-        })
+    planner_duration_ms = round(
+        (time.perf_counter() - planner_start) * 1000,
+        2,
+    )
 
-        # Step 2: Build SQL.
-        sql = build_sql(plan)
+    steps.append({
+        "name": "Planner",
+        "status": "complete",
+        "detail": (
+            f"Detected metric={plan['metric']}, "
+            f"dimension={plan['dimension']}."
+        ),
+        "duration_ms": planner_duration_ms,
+    })
 
-        steps.append({
-            "name": "SQL Builder",
-            "status": "complete",
-            "detail": (
-                "Generated a read-only query from approved query templates."
-            ),
-        })
+    # Step 2: Build SQL.
+    builder_start = time.perf_counter()
 
-        # Step 3: Validate SQL.
-        # IMPORTANT: validator returns a tuple.
-        is_valid, validation_result = validate_readonly_sql(sql)
+    sql = build_sql(plan)
 
-        if not is_valid:
-            raise ValueError(str(validation_result))
+    builder_duration_ms = round(
+        (time.perf_counter() - builder_start) * 1000,
+        2,
+    )
 
-        steps.append({
-            "name": "SQL Safety Critic",
-            "status": "complete",
-            "detail": (
-                "Single SELECT query, approved tables, "
-                "no comments or write operations."
-            ),
-        })
+    steps.append({
+        "name": "SQL Builder",
+        "status": "complete",
+        "detail": (
+            "Generated a read-only query from approved query templates."
+        ),
+        "duration_ms": builder_duration_ms,
+    })
 
-        # Step 4: Execute query.
-        # run_query validates again and extracts the SQL string.
-        columns, rows = run_query(sql)
+    # Step 3: SQL safety validation.
+    critic_start = time.perf_counter()
 
-        steps.append({
-            "name": "Query Executor",
-            "status": "complete",
-            "detail": (
-                f"Executed safely and returned {len(rows)} row(s)."
-            ),
-        })
+    is_valid, validation_result = validate_readonly_sql(sql)
 
-        # Step 5: Generate business insights.
-        answer = make_answer(question, plan, rows)
-        chart = make_chart(columns, rows)
+    if not is_valid:
+        raise ValueError(str(validation_result))
 
-        steps.append({
-            "name": "Business Analyst",
-            "status": "complete",
-            "detail": (
-                "Generated business insights from returned records."
-            ),
-        })
+    safe_sql = validation_result
 
-        duration_ms = round(
-            (time.perf_counter() - start_time) * 1000,
-            2,
+    critic_duration_ms = round(
+        (time.perf_counter() - critic_start) * 1000,
+        2,
+    )
+
+    steps.append({
+        "name": "SQL Safety Critic",
+        "status": "complete",
+        "detail": (
+            "Validated a single SELECT query against approved tables "
+            "and columns using SQLGlot."
+        ),
+        "duration_ms": critic_duration_ms,
+    })
+
+    # Step 4: Safe SQL execution.
+    sql_start = time.perf_counter()
+
+    columns, rows = run_query(
+        safe_sql,
+        timeout_seconds=QUERY_TIMEOUT_SECONDS,
+    )
+
+    sql_duration_ms = round(
+        (time.perf_counter() - sql_start) * 1000,
+        2,
+    )
+
+    steps.append({
+        "name": "Query Executor",
+        "status": "complete",
+        "detail": (
+            f"Executed safely and returned {len(rows)} row(s)."
+        ),
+        "duration_ms": sql_duration_ms,
+    })
+
+    # Step 5: Deterministic answer.
+    deterministic_answer = make_answer(
+        question,
+        plan,
+        rows,
+    )
+
+    # Step 6: Optional AI insight.
+    ai_start = time.perf_counter()
+
+    has_usable_data = bool(rows) and any(
+        value is not None
+        for row in rows
+        for value in row.values()
+    )
+
+    if has_usable_data:
+        ai_result = generate_business_insight(
+            question,
+            rows,
+            deterministic_answer,
         )
-
-        return {
-            "question": question,
-            "answer": answer,
-            "sql": sql,
-            "columns": columns,
-            "rows": rows,
-            "row_count": len(rows),
-            "chart": chart,
-            "steps": steps,
-            "duration_ms": duration_ms,
-            "mode": "deterministic-demo",
+    else:
+        ai_result = {
+            "status": "skipped",
+            "reason": "No matching data available for AI analysis.",
+            "cache_hit": False,
         }
 
-    except Exception:
-        raise
+    ai_duration_ms = round(
+        (time.perf_counter() - ai_start) * 1000,
+        2,
+    )
+
+    # Step 7: Handle AI result safely.
+    ai_status = ai_result.get("status", "unavailable")
+    ai_answer = ai_result.get("answer")
+    cache_hit = bool(ai_result.get("cache_hit", False))
+
+    if ai_status == "accepted" and ai_answer:
+        answer = ai_answer
+        mode = "local-llm-cache" if cache_hit else "local-llm"
+
+        analyst_detail = (
+            "Cached AI insight accepted."
+            if cache_hit
+            else "AI answer accepted: numerical validation passed."
+        )
+
+    elif ai_status == "rejected":
+        answer = deterministic_answer
+        mode = "deterministic-demo"
+
+        unsupported_numbers = ai_result.get(
+            "unsupported_numbers",
+            [],
+        )
+
+        analyst_detail = (
+            "AI answer rejected: "
+            f"{ai_result.get('reason', 'Validation failed.')} "
+            f"Unsupported numbers: {unsupported_numbers}"
+        )
+
+    elif ai_status == "unavailable":
+        answer = deterministic_answer
+        mode = "deterministic-demo"
+
+        analyst_detail = (
+            "Local AI unavailable: "
+            f"{ai_result.get('reason', 'Unknown error.')}"
+        )
+
+    else:
+        answer = deterministic_answer
+        mode = "deterministic-demo"
+
+        analyst_detail = (
+            "AI generation skipped: "
+            f"{ai_result.get('reason', 'No AI response available.')}"
+        )
+
+    # Step 8: Generate chart from verified rows.
+    chart_start = time.perf_counter()
+
+    chart = make_chart(columns, rows)
+
+    chart_duration_ms = round(
+        (time.perf_counter() - chart_start) * 1000,
+        2,
+    )
+
+    steps.append({
+        "name": "Business Analyst",
+        "status": "complete",
+        "detail": analyst_detail,
+        "duration_ms": ai_duration_ms,
+        "cache_hit": cache_hit,
+    })
+
+    duration_ms = round(
+        (time.perf_counter() - workflow_start) * 1000,
+        2,
+    )
+
+    return {
+        "question": question,
+        "answer": answer,
+        "sql": safe_sql,
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "chart": chart,
+        "steps": steps,
+        "duration_ms": duration_ms,
+        "sql_duration_ms": sql_duration_ms,
+        "ai_duration_ms": ai_duration_ms,
+        "planner_duration_ms": planner_duration_ms,
+        "builder_duration_ms": builder_duration_ms,
+        "critic_duration_ms": critic_duration_ms,
+        "chart_duration_ms": chart_duration_ms,
+        "cache_hit": cache_hit,
+        "mode": mode,
+    }

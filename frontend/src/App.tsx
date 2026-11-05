@@ -1,5 +1,6 @@
-
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -16,6 +17,8 @@ import {
   Check,
   ChevronDown,
   Clock3,
+  Columns3,
+  Copy,
   Database,
   Download,
   Gauge,
@@ -33,23 +36,13 @@ import {
   WandSparkles,
   Zap,
   CircleHelp,
-  Copy,
-  Columns3,
 } from 'lucide-react'
 
-import {
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
+const AnalyticsChart = lazy(() => import('./components/AnalyticsChart'))
 
-const API = 'http://127.0.0.1:8000'
+const API = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 
-type Page = 'Analytics studio' | 'Data sources' | 'SQL explorer'
+type Page = 'Analytics studio' | 'Data sources' | 'SQL explorer' | 'Performance'
 type ResultTab = 'visual' | 'table' | 'sql'
 type Health = 'checking' | 'online' | 'offline'
 
@@ -78,6 +71,15 @@ interface AnalysisResult {
   steps: AgentStep[]
   duration_ms: number
   mode: string
+
+  // Performance metrics returned by the upgraded backend.
+  planner_duration_ms?: number
+  builder_duration_ms?: number
+  critic_duration_ms?: number
+  sql_duration_ms?: number
+  ai_duration_ms?: number
+  chart_duration_ms?: number
+  cache_hit?: boolean
 }
 
 interface HistoryItem {
@@ -87,6 +89,33 @@ interface HistoryItem {
 interface SchemaTable {
   table: string
   columns: string[]
+}
+
+interface PerformanceTrendItem {
+  timestamp: string
+  status: string
+  api_duration_ms: number
+  sql_duration_ms: number
+  ai_duration_ms: number
+  cache_hit: boolean | null
+  row_count: number
+}
+
+interface PerformanceSnapshot {
+  requests_total: number
+  successful_requests: number
+  failed_requests: number
+  success_rate: number
+  avg_api_duration_ms: number
+  p95_api_duration_ms: number
+  avg_sql_duration_ms: number
+  avg_ai_duration_ms: number
+  cache_hits: number
+  cache_misses: number
+  cache_hit_rate: number
+  sample_size: number
+  max_sample_size: number
+  trend: PerformanceTrendItem[]
 }
 
 const examples = [
@@ -127,8 +156,31 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([])
   const [tab, setTab] = useState<ResultTab>('visual')
   const [sidebar, setSidebar] = useState(true)
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [activeNav, setActiveNav] = useState<Page>('Analytics studio')
   const [schemaLoading, setSchemaLoading] = useState(false)
+  const [performance, setPerformance] = useState<PerformanceSnapshot | null>(null)
+  const [performanceLoading, setPerformanceLoading] = useState(false)
+  const [performanceError, setPerformanceError] = useState('')
+  const [performanceUpdatedAt, setPerformanceUpdatedAt] = useState<Date | null>(null)
+
+  useEffect(() => {
+    if (!mobileSidebarOpen) return
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileSidebarOpen(false)
+    }
+
+    window.addEventListener('keydown', closeOnEscape)
+
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [mobileSidebarOpen])
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -164,6 +216,63 @@ export default function App() {
       setSchemaLoading(false)
     }
   }, [])
+
+  const refreshPerformance = useCallback(async (showLoading = true) => {
+    if (showLoading) setPerformanceLoading(true)
+    setPerformanceError('')
+
+    try {
+      const response = await fetch(`${API}/api/performance`, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      })
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}))
+        throw new Error(
+          typeof body.detail === 'string'
+            ? body.detail
+            : `Performance API returned HTTP ${response.status}.`,
+        )
+      }
+
+      const data = await response.json()
+      setPerformance({
+        requests_total: Number(data.requests_total ?? 0),
+        successful_requests: Number(data.successful_requests ?? 0),
+        failed_requests: Number(data.failed_requests ?? 0),
+        success_rate: Number(data.success_rate ?? 0),
+        avg_api_duration_ms: Number(data.average_api_duration_ms ?? 0),
+        p95_api_duration_ms: Number(data.p95_api_duration_ms ?? 0),
+        avg_sql_duration_ms: Number(data.average_sql_duration_ms ?? 0),
+        avg_ai_duration_ms: Number(data.average_ai_duration_ms ?? 0),
+        cache_hits: Number(data.cache_hits ?? 0),
+        cache_misses: Number(data.cache_misses ?? 0),
+        cache_hit_rate: Number(data.cache_hit_rate ?? 0),
+        sample_size: Number(data.sample_size ?? 0),
+        max_sample_size: Number(data.max_sample_size ?? 500),
+        trend: Array.isArray(data.trend) ? data.trend : [],
+      })
+      setPerformanceUpdatedAt(new Date())
+    } catch (err) {
+      setPerformanceError(
+        err instanceof Error ? err.message : 'Unable to load performance metrics.',
+      )
+    } finally {
+      if (showLoading) setPerformanceLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (activeNav !== 'Performance') return
+
+    void refreshPerformance()
+    const interval = window.setInterval(() => {
+      void refreshPerformance(false)
+    }, 15000)
+
+    return () => window.clearInterval(interval)
+  }, [activeNav, refreshPerformance])
 
   useEffect(() => {
     let mounted = true
@@ -212,6 +321,7 @@ export default function App() {
     setError('')
     setResult(null)
     setActiveNav('Analytics studio')
+    setMobileSidebarOpen(false)
 
     try {
       const response = await fetch(`${API}/api/ask`, {
@@ -262,23 +372,42 @@ export default function App() {
     }
   }
 
+  // Extract a numeric total from the returned database result.
   const totalRevenue = useMemo(() => {
     if (!result?.rows.length) return null
 
     const firstRow = result.rows[0]
 
-    for (const key of ['total_revenue', 'total', 'revenue']) {
+    const totalKeys = [
+      'total_revenue',
+      'total',
+      'sum_revenue',
+      'revenue_total',
+    ]
+
+    for (const key of totalKeys) {
       const value = firstRow[key]
 
-      if (typeof value === 'number') {
-        if (key === 'revenue' && result.rows.length > 1) {
-          return result.rows.reduce((sum, row) => {
-            const amount = row[key]
-            return sum + (typeof amount === 'number' ? amount : 0)
-          }, 0)
-        }
-
+      if (typeof value === 'number' && Number.isFinite(value)) {
         return value
+      }
+    }
+
+    // If the query returns individual revenue rows, sum those rows.
+    const revenueKey = result.columns.find(
+      (column) => column.toLowerCase() === 'revenue',
+    )
+
+    if (revenueKey) {
+      const values = result.rows
+        .map((row) => row[revenueKey])
+        .filter(
+          (value): value is number =>
+            typeof value === 'number' && Number.isFinite(value),
+        )
+
+      if (values.length > 0) {
+        return values.reduce((sum, value) => sum + value, 0)
       }
     }
 
@@ -340,11 +469,13 @@ export default function App() {
     setError('')
     setTab('visual')
     setActiveNav('Analytics studio')
+    setMobileSidebarOpen(false)
   }
 
   const selectNavigation = (page: Page) => {
     setActiveNav(page)
     setError('')
+    setMobileSidebarOpen(false)
 
     if (page === 'Analytics studio') {
       newAnalysis()
@@ -353,18 +484,39 @@ export default function App() {
     if (page === 'Data sources') {
       void refreshSchema()
     }
+
   }
+
+  const toggleSidebar = () => {
+    if (window.matchMedia('(max-width: 760px)').matches) {
+      setMobileSidebarOpen((previous) => !previous)
+    } else {
+      setSidebar((previous) => !previous)
+    }
+  }
+
+  const uniqueHistory = history.filter(
+    (item, index, items) =>
+      items.findIndex(
+        (candidate) =>
+          candidate.question.trim().toLowerCase() ===
+          item.question.trim().toLowerCase(),
+      ) === index,
+  )
 
   return (
     <div className="shell">
-      {/* SIDEBAR */}
-      <aside className={`sidebar ${!sidebar ? 'collapsed' : ''}`}>
+      <aside
+        className={`sidebar ${!sidebar ? 'collapsed' : ''} ${
+          mobileSidebarOpen ? 'mobile-open' : ''
+        }`}
+      >
         <div className="brand">
           <div className="mark">
             <Orbit />
           </div>
 
-          {sidebar && (
+          {(sidebar || mobileSidebarOpen) && (
             <div>
               <b>ORBIT<span>.</span></b>
               <small>INTELLIGENCE WORKSPACE</small>
@@ -375,7 +527,7 @@ export default function App() {
         <div className="workspace">
           <div className="avatar">N</div>
 
-          {sidebar && (
+          {(sidebar || mobileSidebarOpen) && (
             <>
               <span>
                 <b>Northstar Retail</b>
@@ -386,7 +538,7 @@ export default function App() {
           )}
         </div>
 
-        {sidebar && (
+        {(sidebar || mobileSidebarOpen) && (
           <>
             <label>WORKSPACE</label>
 
@@ -411,6 +563,13 @@ export default function App() {
               onClick={() => selectNavigation('SQL explorer')}
             />
 
+            <NavButton
+              icon={<Gauge />}
+              name="Performance"
+              active={activeNav === 'Performance'}
+              onClick={() => selectNavigation('Performance')}
+            />
+
             <button className="nav" disabled title="Coming soon">
               <Layers3 />
               Agent workflows
@@ -421,7 +580,7 @@ export default function App() {
 
             <label>RECENT ANALYSES</label>
 
-            {history.slice(0, 5).map((item, index) => (
+            {uniqueHistory.slice(0, 5).map((item, index) => (
               <button
                 className="recent"
                 key={`${item.question}-${index}`}
@@ -433,7 +592,7 @@ export default function App() {
               </button>
             ))}
 
-            {history.length === 0 && (
+            {uniqueHistory.length === 0 && (
               <div className="recent">
                 <Clock3 />
                 No recent analyses
@@ -445,7 +604,7 @@ export default function App() {
         <div className="side-bottom">
           <div className="environment">
             <Zap />
-            {sidebar && (
+            {(sidebar || mobileSidebarOpen) && (
               <span>
                 <b>Demo environment</b>
                 <small>Local synthetic dataset</small>
@@ -455,7 +614,7 @@ export default function App() {
 
           <div className="profile">
             <div className="avatar">NK</div>
-            {sidebar && (
+            {(sidebar || mobileSidebarOpen) && (
               <span>
                 <b>Analyst workspace</b>
                 <small>Personal account</small>
@@ -465,14 +624,19 @@ export default function App() {
         </div>
       </aside>
 
-      {/* MAIN CONTENT */}
+      {mobileSidebarOpen && (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
+
       <main>
         <header>
           <div className="crumb">
-            <button
-              onClick={() => setSidebar((previous) => !previous)}
-              title="Toggle sidebar"
-            >
+            <button onClick={toggleSidebar} title="Toggle sidebar">
               <PanelLeftClose />
             </button>
 
@@ -497,7 +661,15 @@ export default function App() {
         </header>
 
         <div className="content">
-          {activeNav === 'Data sources' ? (
+          {activeNav === 'Performance' ? (
+            <PerformanceDashboard
+              data={performance}
+              loading={performanceLoading}
+              error={performanceError}
+              updatedAt={performanceUpdatedAt}
+              onRefresh={() => void refreshPerformance()}
+            />
+          ) : activeNav === 'Data sources' ? (
             <DataSourcesPage
               schema={schema}
               health={health}
@@ -512,7 +684,6 @@ export default function App() {
             />
           ) : (
             <>
-              {/* DASHBOARD HEADING */}
               <div className="heading">
                 <div>
                   <label>
@@ -535,7 +706,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* ASK ORBIT */}
               <section className="ask">
                 <div className="ask-title">
                   <div className="spark">
@@ -617,13 +787,12 @@ export default function App() {
                 </div>
               )}
 
-              {/* KPI METRICS */}
               <div className="metrics">
                 <Metric
                   icon={<TrendingUp />}
                   label="TOTAL REVENUE"
                   value={totalRevenue !== null ? money(totalRevenue) : '—'}
-                  note="Revenue in current result"
+                  note="Calculated from returned data"
                 />
 
                 <Metric
@@ -648,7 +817,6 @@ export default function App() {
                 />
               </div>
 
-              {/* RESULTS HEADER */}
               <div className="section-head">
                 <div>
                   <label>YOUR WORKSPACE</label>
@@ -678,7 +846,6 @@ export default function App() {
                 </div>
               ) : result ? (
                 <div className="results">
-                  {/* RESULT CARD */}
                   <section className="panel">
                     <div className="panel-head">
                       <b>
@@ -701,192 +868,127 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* RESULT TABS */}
                     <div className="tabs">
                       <button
                         className={tab === 'visual' ? 'chosen' : ''}
                         onClick={() => setTab('visual')}
                       >
-                        <BarChart3 />
-                        Visualization
+                        <BarChart3 /> Visual
                       </button>
 
                       <button
                         className={tab === 'table' ? 'chosen' : ''}
                         onClick={() => setTab('table')}
                       >
-                        <Table2 />
-                        Data table
+                        <Table2 /> Data table
                       </button>
 
                       <button
                         className={tab === 'sql' ? 'chosen' : ''}
                         onClick={() => setTab('sql')}
                       >
-                        <Terminal />
-                        SQL query
+                        <Terminal /> SQL
                       </button>
                     </div>
 
                     <div className="tabbody">
-                      {/* AUTOMATIC KPI OR CHART */}
-                      {tab === 'visual' && (
-                        isSingleValue ? (
-                          <div className="single-kpi">
-                            <span>KEY BUSINESS METRIC</span>
-
-                            <h2>
-                              {totalRevenue !== null
-                                ? money(totalRevenue)
-                                : formatValue(
-                                    Object.values(result.rows[0] ?? {})[0],
-                                  )}
-                            </h2>
-
-                            <p>{result.answer}</p>
-
-                            <small>
-                              Single-value result · No chart required
-                            </small>
-                          </div>
-                        ) : result.chart && result.chart.data.length > 0 ? (
-                          <>
-                            <div className="chart-title">
-                              {result.chart.label} by {result.chart.xKey}
-                              <small>QUERY OUTPUT</small>
-                            </div>
-
-                            <ResponsiveContainer width="100%" height={300}>
-                              <BarChart
-                                data={result.chart.data}
-                                margin={{
-                                  top: 10,
-                                  right: 10,
-                                  left: 0,
-                                  bottom: 5,
-                                }}
-                              >
-                                <CartesianGrid
-                                  stroke="#253146"
-                                  strokeDasharray="3 3"
-                                  vertical={false}
-                                />
-
-                                <XAxis
-                                  dataKey={result.chart.xKey}
-                                  tick={{
-                                    fill: '#a5b2c9',
-                                    fontSize: 11,
-                                  }}
-                                  axisLine={false}
-                                  tickLine={false}
-                                />
-
-                                <YAxis
-                                  tick={{
-                                    fill: '#a5b2c9',
-                                    fontSize: 11,
-                                  }}
-                                  axisLine={false}
-                                  tickLine={false}
-                                />
-
-                                <Tooltip
-                                  contentStyle={{
-                                    background: '#101827',
-                                    border: '1px solid #51447e',
-                                    borderRadius: 10,
-                                    color: '#e8edf7',
-                                  }}
-                                />
-
-                                <Bar
-                                  dataKey={result.chart.yKey}
-                                  fill="#9b8aff"
-                                  radius={[6, 6, 0, 0]}
-                                  maxBarSize={58}
-                                />
-                              </BarChart>
-                            </ResponsiveContainer>
-                          </>
+                      {tab === 'visual' ? (
+                        result.chart && result.chart.data.length > 0 ? (
+                          <Suspense
+                            fallback={
+                              <div className="chart-wrap" aria-live="polite">
+                                <div className="chart-title">
+                                  <b>Loading visualization...</b>
+                                  <small>PLEASE WAIT</small>
+                                </div>
+                                <div className="no-chart">
+                                  <Loader2 className="spin" />
+                                  <span>Loading chart module</span>
+                                </div>
+                              </div>
+                            }
+                          >
+                            <AnalyticsChart chart={result.chart} />
+                          </Suspense>
+                        ) : totalRevenue !== null ? (
+                          <RevenueVisualization
+                            totalRevenue={totalRevenue}
+                            rowCount={result.row_count}
+                          />
                         ) : (
-                          <div className="single-kpi">
-                            <span>ANALYSIS RESULT</span>
-                            <h2>{result.row_count} records</h2>
-                            <p>{result.answer}</p>
-                            <small>
-                              No visualization available for this result
-                            </small>
+                          <div className="no-chart">
+                            <BarChart3 />
+                            <span>
+                              No visualization available for this result.
+                            </span>
                           </div>
                         )
-                      )}
-
-                      {/* DATA TABLE */}
-                      {tab === 'table' && <DataTable result={result} />}
-
-                      {/* SQL */}
-                      {tab === 'sql' && (
+                      ) : tab === 'table' ? (
+                        <DataTable result={result} />
+                      ) : (
                         <div className="sql">
                           <div>
                             <span>● SQL VALIDATED</span>
-
                             <button onClick={() => void copySQL()}>
-                              <Copy />
-                              Copy SQL
+                              <Copy /> Copy
                             </button>
                           </div>
 
-                          <pre>{result.sql}</pre>
+                          <pre>{result.sql || '-- No SQL returned'}</pre>
 
                           <small>
                             <ShieldCheck />
-                            Single SELECT · approved schema · read-only connection
+                            Read-only query · validated before execution
                           </small>
                         </div>
                       )}
                     </div>
                   </section>
 
-                  {/* RIGHT SIDE */}
                   <div className="stack">
                     <section className="panel">
                       <div className="panel-head">
-                        <b>AGENT TRACE</b>
-                        <span className="done">● COMPLETE</span>
+                        <b><Activity /> AGENT TRACE</b>
+                        <span className="done">COMPLETED</span>
                       </div>
 
                       <div className="trace">
                         {result.steps.map((step, index) => (
-                          <div
-                            className="step"
-                            key={`${step.name}-${index}`}
-                          >
+                          <div className="step" key={`${step.name}-${index}`}>
                             <i><Check /></i>
-
                             <div>
                               <b>{step.name}</b>
                               <small>{step.detail}</small>
                             </div>
-
-                            {index !== result.steps.length - 1 && <u />}
+                            {index < result.steps.length - 1 && <u />}
                           </div>
                         ))}
                       </div>
                     </section>
 
-                    <section className="panel catalog">
-                      <button
-                        onClick={() => selectNavigation('Data sources')}
-                      >
-                        <b><Database /> DATA CATALOG</b>
-                        <ArrowUpRight />
-                      </button>
+                    <PerformancePanel result={result} />
 
-                      <p>Connected demo warehouse</p>
+                    <section className="panel">
+                      <div className="panel-head">
+                        <b><Database /> DATA CONTEXT</b>
+                        <span>SCHEMA</span>
+                      </div>
 
-                      <small className="dbstatus">
-                        ● SQLite · {schema.length} tables
-                      </small>
+                      <div className="catalog">
+                        <button onClick={() => selectNavigation('Data sources')}>
+                          <b><Table2 /> INSPECT TABLES</b>
+                          <ArrowUpRight />
+                        </button>
+
+                        <p>
+                          ORBIT uses the connected read-only schema to plan
+                          and validate analytical queries.
+                        </p>
+
+                        <small className="dbstatus">
+                          ● SQLite · {schema.length} tables discovered
+                        </small>
+                      </div>
                     </section>
                   </div>
                 </div>
@@ -915,6 +1017,328 @@ export default function App() {
           )}
         </div>
       </main>
+    </div>
+  )
+}
+/* REVENUE VISUALIZATION */
+function RevenueVisualization({
+  totalRevenue,
+  rowCount,
+}: {
+  totalRevenue: number
+  rowCount: number
+}) {
+  return (
+    <div className="revenue-visual">
+      <div className="revenue-visual-top">
+        <span><TrendingUp /> REVENUE PERFORMANCE</span>
+        <span className="verified"><Check /> DATABASE RESULT</span>
+      </div>
+
+      <div className="revenue-hero">
+        <small>TOTAL REVENUE</small>
+        <strong>{money(totalRevenue)}</strong>
+        <p>
+          Revenue calculated from the returned database results.
+        </p>
+      </div>
+
+      <div className="revenue-visual-bar">
+        <div />
+      </div>
+
+      <div className="revenue-visual-bottom">
+        <span>{rowCount} result rows</span>
+        <span>Returned database total</span>
+      </div>
+    </div>
+  )
+}
+
+/* PERFORMANCE BREAKDOWN */
+function PerformancePanel({
+  result,
+}: {
+  result: AnalysisResult
+}) {
+  const metrics = [
+    {
+      label: 'Planner',
+      value: result.planner_duration_ms,
+      description: 'Question planning',
+    },
+    {
+      label: 'SQL Builder',
+      value: result.builder_duration_ms,
+      description: 'SQL generation',
+    },
+    {
+      label: 'SQL Critic',
+      value: result.critic_duration_ms,
+      description: 'Query validation',
+    },
+    {
+      label: 'Database',
+      value: result.sql_duration_ms,
+      description: 'Query execution',
+    },
+    {
+      label: 'AI Analyst',
+      value: result.ai_duration_ms,
+      description: 'Business insight generation',
+    },
+    {
+      label: 'Chart',
+      value: result.chart_duration_ms,
+      description: 'Visualization generation',
+    },
+  ]
+
+  const availableMetrics = metrics.filter(
+    (metric) =>
+      typeof metric.value === 'number' &&
+      Number.isFinite(metric.value),
+  )
+
+  return (
+    <section className="panel performance-panel">
+      <div className="panel-head">
+        <b>
+          <Gauge />
+          PERFORMANCE BREAKDOWN
+        </b>
+
+        <span className="done">
+          {result.cache_hit === true
+            ? 'CACHE HIT'
+            : result.cache_hit === false
+              ? 'CACHE MISS'
+              : 'EXECUTION'}
+        </span>
+      </div>
+
+      <div className="performance-summary">
+        <div>
+          <small>TOTAL EXECUTION TIME</small>
+          <strong>{formatDuration(result.duration_ms)}</strong>
+        </div>
+
+        <div>
+          <small>AI CACHE</small>
+          <strong>
+            {result.cache_hit === true
+              ? 'HIT'
+              : result.cache_hit === false
+                ? 'MISS'
+                : 'N/A'}
+          </strong>
+        </div>
+      </div>
+
+      <div className="performance-list">
+        {availableMetrics.length > 0 ? (
+          availableMetrics.map((metric) => (
+            <div className="performance-item" key={metric.label}>
+              <div className="performance-item-info">
+                <span>{metric.label}</span>
+                <small>{metric.description}</small>
+              </div>
+
+              <strong>
+                {formatDuration(metric.value)}
+              </strong>
+            </div>
+          ))
+        ) : (
+          <div className="performance-empty">
+            <Clock3 />
+            <span>
+              Detailed timing metrics are not available from the backend.
+            </span>
+          </div>
+        )}
+      </div>
+
+      <div className="performance-footer">
+        <span>
+          <Activity />
+          {availableMetrics.length} timing metrics received
+        </span>
+
+        <span>
+          Mode: {result.mode || 'Standard'}
+        </span>
+      </div>
+    </section>
+  )
+}
+
+/* AGGREGATE PERFORMANCE DASHBOARD */
+function PerformanceDashboard({
+  data,
+  loading,
+  error,
+  updatedAt,
+  onRefresh,
+}: {
+  data: PerformanceSnapshot | null
+  loading: boolean
+  error: string
+  updatedAt: Date | null
+  onRefresh: () => void
+}) {
+  const trend = data?.trend ?? []
+  const maxLatency = Math.max(
+    1,
+    ...trend.map((item) => Number(item.api_duration_ms) || 0),
+  )
+  const cacheTotal = (data?.cache_hits ?? 0) + (data?.cache_misses ?? 0)
+  const hitPercent = cacheTotal > 0
+    ? Math.min(100, Math.max(0, (data?.cache_hits ?? 0) / cacheTotal * 100))
+    : 0
+
+  return (
+    <>
+      <div className="heading">
+        <div>
+          <label><i /> INTELLIGENCE / SYSTEM PERFORMANCE</label>
+          <h1>Performance <em>dashboard.</em></h1>
+          <p>Monitor API latency, database execution, AI response time, and cache activity.</p>
+        </div>
+        <div className="live">
+          <span /> LIVE METRICS
+          <small>{updatedAt ? `UPDATED ${updatedAt.toLocaleTimeString()}` : 'WAITING FOR DATA'}</small>
+        </div>
+      </div>
+
+      {error && (
+        <div className="error">
+          <AlertCircle />
+          <span>{error} Make sure the backend exposes GET /api/performance.</span>
+        </div>
+      )}
+
+      <div className="section-head performance-page-head">
+        <div>
+          <label>RUNTIME OVERVIEW</label>
+          <h2>System health and latency</h2>
+        </div>
+        <div>
+          <span className="performance-auto-refresh">AUTO REFRESH · 15 SEC</span>
+          <button className="outline" onClick={onRefresh} disabled={loading}>
+            {loading ? <Loader2 className="spin" /> : <RefreshCw />}
+            {loading ? 'Refreshing...' : 'Refresh now'}
+          </button>
+        </div>
+      </div>
+
+      {loading && !data ? (
+        <div className="empty loading">
+          <Loader2 className="spin" />
+          <h3>Loading performance metrics</h3>
+          <p>Fetching aggregate request and latency statistics.</p>
+        </div>
+      ) : data ? (
+        <>
+          <div className="metrics performance-kpis">
+            <Metric icon={<Activity />} label="TOTAL REQUESTS" value={String(data.requests_total)} note={`${data.sample_size} samples retained`} />
+            <Metric icon={<ShieldCheck />} label="SUCCESS RATE" value={`${data.success_rate.toFixed(1)}%`} note={`${data.successful_requests} successful · ${data.failed_requests} failed`} />
+            <Metric icon={<Gauge />} label="AVG API LATENCY" value={formatDuration(data.avg_api_duration_ms)} note="Average request duration" />
+            <Metric icon={<Clock3 />} label="P95 API LATENCY" value={formatDuration(data.p95_api_duration_ms)} note="95th percentile request duration" />
+          </div>
+
+          <div className="performance-detail-grid">
+            <section className="panel performance-detail-card">
+              <div className="panel-head">
+                <b><Activity /> LATENCY BREAKDOWN</b>
+                <span>AVERAGE</span>
+              </div>
+              <div className="performance-latency-list">
+                <LatencyBar label="API" value={data.avg_api_duration_ms} max={Math.max(data.avg_api_duration_ms, data.avg_sql_duration_ms, data.avg_ai_duration_ms, 1)} />
+                <LatencyBar label="Database / SQL" value={data.avg_sql_duration_ms} max={Math.max(data.avg_api_duration_ms, data.avg_sql_duration_ms, data.avg_ai_duration_ms, 1)} />
+                <LatencyBar label="AI analyst" value={data.avg_ai_duration_ms} max={Math.max(data.avg_api_duration_ms, data.avg_sql_duration_ms, data.avg_ai_duration_ms, 1)} />
+              </div>
+              <div className="performance-card-note">Timings are reported by the backend performance collector.</div>
+            </section>
+
+            <section className="panel performance-detail-card">
+              <div className="panel-head">
+                <b><Zap /> CACHE PERFORMANCE</b>
+                <span>{cacheTotal} EVENTS</span>
+              </div>
+              <div className="performance-cache-rate">
+                <strong>{data.cache_hit_rate.toFixed(1)}%</strong>
+                <span>Cache hit rate</span>
+              </div>
+              <div className="performance-cache-track">
+                <div style={{ width: `${hitPercent}%` }} />
+              </div>
+              <div className="performance-cache-stats">
+                <div><i className="cache-hit-dot" /><span>Hits</span><b>{data.cache_hits}</b></div>
+                <div><i className="cache-miss-dot" /><span>Misses</span><b>{data.cache_misses}</b></div>
+              </div>
+              <div className="performance-card-note">Only accepted AI insight cache events are counted.</div>
+            </section>
+          </div>
+
+          <section className="panel performance-trend-panel">
+            <div className="panel-head">
+              <b><TrendingUp /> RECENT REQUEST LATENCY</b>
+              <span>LAST {trend.length} REQUESTS</span>
+            </div>
+            {trend.length > 0 ? (
+              <div className="performance-trend-list">
+                {trend.map((item, index) => {
+                  const width = Math.max(2, (Math.max(0, Number(item.api_duration_ms) || 0) / maxLatency) * 100)
+                  const date = new Date(item.timestamp)
+                  return (
+                    <div className="performance-trend-row" key={`${item.timestamp}-${index}`}>
+                      <div className="performance-trend-meta">
+                        <span>#{index + 1} · {Number.isNaN(date.getTime()) ? item.timestamp : date.toLocaleTimeString()}</span>
+                        <small>{item.status} · {item.row_count} rows</small>
+                      </div>
+                      <div className="performance-trend-track"><div style={{ width: `${width}%` }} /></div>
+                      <strong>{formatDuration(item.api_duration_ms)}</strong>
+                      <span className={`performance-cache-tag ${item.cache_hit === true ? 'hit' : item.cache_hit === false ? 'miss' : ''}`}>
+                        {item.cache_hit === true ? 'HIT' : item.cache_hit === false ? 'MISS' : '—'}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="performance-no-data"><Clock3 /><span>No request samples yet. Run an analysis in Analytics Studio to populate this chart.</span></div>
+            )}
+          </section>
+
+          <div className="performance-dashboard-foot">
+            <span><Database /> Sample window: {data.sample_size} / {data.max_sample_size} requests</span>
+            <span>Metrics are in-memory and reset when the backend restarts.</span>
+          </div>
+        </>
+      ) : (
+        <div className="empty">
+          <Gauge />
+          <h3>Performance metrics are not available</h3>
+          <p>Check that the backend is running and that GET /api/performance is enabled.</p>
+          <button className="outline" onClick={onRefresh}><RefreshCw /> Try again</button>
+        </div>
+      )}
+
+      <footer>
+        <span>ORBIT INTELLIGENCE WORKSPACE · PERFORMANCE</span>
+        <span>Auto-refreshes every 15 seconds while this page is open.</span>
+      </footer>
+    </>
+  )
+}
+
+function LatencyBar({ label, value, max }: { label: string; value: number; max: number }) {
+  const width = max > 0 ? Math.min(100, Math.max(0, value / max * 100)) : 0
+  return (
+    <div className="performance-latency-item">
+      <div><span>{label}</span><strong>{formatDuration(value)}</strong></div>
+      <div className="performance-latency-track"><div style={{ width: `${width}%` }} /></div>
     </div>
   )
 }
@@ -967,7 +1391,8 @@ function DataSourcesPage({
   }, [schema, selectedTable])
 
   const totalColumns = schema.reduce(
-    (sum, table) => sum + (Array.isArray(table.columns) ? table.columns.length : 0),
+    (sum, table) =>
+      sum + (Array.isArray(table.columns) ? table.columns.length : 0),
     0,
   )
 
@@ -988,7 +1413,11 @@ function DataSourcesPage({
 
         <div className="live">
           <span />
-          {health === 'online' ? 'CONNECTED' : health === 'offline' ? 'OFFLINE' : 'CHECKING'}
+          {health === 'online'
+            ? 'CONNECTED'
+            : health === 'offline'
+              ? 'OFFLINE'
+              : 'CHECKING'}
           <small>LOCAL SQLITE DEMO WAREHOUSE</small>
         </div>
       </div>
@@ -997,7 +1426,13 @@ function DataSourcesPage({
         <Metric
           icon={<Database />}
           label="CONNECTION"
-          value={health === 'online' ? 'Online' : health === 'offline' ? 'Offline' : 'Checking'}
+          value={
+            health === 'online'
+              ? 'Online'
+              : health === 'offline'
+                ? 'Offline'
+                : 'Checking'
+          }
           note="Backend health status"
         />
 
@@ -1045,14 +1480,18 @@ function DataSourcesPage({
             {schema.map((table) => (
               <button
                 key={table.table}
-                className={`source-table-item ${selectedTable === table.table ? 'selected' : ''}`}
+                className={`source-table-item ${
+                  selectedTable === table.table ? 'selected' : ''
+                }`}
                 onClick={() => setSelectedTable(table.table)}
               >
                 <Database />
+
                 <span>
                   <b>{table.table}</b>
                   <small>{table.columns.length} columns</small>
                 </span>
+
                 <ArrowUpRight />
               </button>
             ))}
@@ -1186,7 +1625,6 @@ function SqlExplorerPage({
     </>
   )
 }
-
 /* KPI CARD */
 function Metric({
   icon,
@@ -1229,9 +1667,7 @@ function DataTable({ result }: { result: AnalysisResult }) {
         <thead>
           <tr>
             {result.columns.map((column) => (
-              <th key={column}>
-                {column.replace(/_/g, ' ')}
-              </th>
+              <th key={column}>{column.replace(/_/g, ' ')}</th>
             ))}
           </tr>
         </thead>
@@ -1272,6 +1708,10 @@ function formatValue(value: unknown): string {
     return value.toLocaleString('en-US')
   }
 
+  if (typeof value === 'boolean') {
+    return value ? 'Yes' : 'No'
+  }
+
   return String(value)
 }
 
@@ -1281,6 +1721,23 @@ function money(value: number): string {
     currency: 'USD',
     maximumFractionDigits: 2,
   })
+}
+
+/* PERFORMANCE DURATION FORMATTER */
+function formatDuration(value: number | undefined): string {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < 0
+  ) {
+    return '—'
+  }
+
+  if (value < 1000) {
+    return `${Math.round(value)} ms`
+  }
+
+  return `${(value / 1000).toFixed(2)} s`
 }
 
 /* ORBIT LOGO */
