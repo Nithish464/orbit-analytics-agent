@@ -14,3 +14,4 @@ playwright-report/
 test-results/
 orbit-analytics-agent/
 frontend/tsconfig.tsbuildinfo
+orbit-analytics-agent/
