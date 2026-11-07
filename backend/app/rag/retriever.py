@@ -116,10 +116,10 @@ class OrbitRetriever:
         return normalized
 
     @staticmethod
-    def _extract_year(query: str) -> Optional[str]:
-        """Return an explicitly mentioned four-digit year, if present."""
-        match = re.search(r"\\b(?:19|20)\\d{2}\\b", query)
-        return match.group(0) if match else None
+    def _extract_year(query: str) -> Optional[int]:
+        """Return an explicitly mentioned four-digit year as an integer."""
+        match = re.search(r"\b(?:19|20)\d{2}\b", query)
+        return int(match.group(0)) if match else None
 
     @classmethod
     def _content_hash(cls, content: str) -> str:
