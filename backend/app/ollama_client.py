@@ -26,6 +26,16 @@ OLLAMA_MODEL = os.getenv(
     "qwen2.5:1.5b",
 )
 
+# Optional Bearer token for hosted Ollama-compatible endpoints.
+# Leave OLLAMA_API_KEY unset for local Ollama.
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
+
+OLLAMA_HEADERS = (
+    {"Authorization": f"Bearer {OLLAMA_API_KEY}"}
+    if OLLAMA_API_KEY
+    else {}
+)
+
 def _get_positive_float_env(name: str, default: float) -> float:
     """Read a positive floating-point setting from the environment."""
 
@@ -92,6 +102,7 @@ _http_client = httpx.Client(
         max_keepalive_connections=5,
         keepalive_expiry=30.0,
     ),
+    headers=OLLAMA_HEADERS,
 )
 
 
