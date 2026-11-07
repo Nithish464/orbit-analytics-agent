@@ -106,6 +106,35 @@ _http_client = httpx.Client(
 )
 
 
+def _create_http_client() -> httpx.Client:
+    """Create the reusable HTTP client with configured timeouts and auth."""
+
+    return httpx.Client(
+        timeout=httpx.Timeout(
+            timeout=OLLAMA_TIMEOUT,
+            connect=OLLAMA_CONNECT_TIMEOUT,
+            pool=OLLAMA_POOL_TIMEOUT,
+        ),
+        limits=httpx.Limits(
+            max_connections=10,
+            max_keepalive_connections=5,
+            keepalive_expiry=30.0,
+        ),
+        headers=OLLAMA_HEADERS,
+    )
+
+
+def _get_http_client() -> httpx.Client:
+    """Return an open client, recreating it after application shutdown."""
+
+    global _http_client
+
+    if _http_client.is_closed:
+        _http_client = _create_http_client()
+
+    return _http_client
+
+
 # ============================================================
 # THREAD-SAFE ACCEPTED ANSWER CACHE
 # ============================================================
@@ -244,7 +273,7 @@ def check_ollama() -> dict:
     """Check Ollama connectivity and model availability."""
 
     try:
-        response = _http_client.get(
+        response = _get_http_client().get(
             f"{OLLAMA_BASE_URL}/api/tags",
             timeout=httpx.Timeout(3.0, connect=2.0),
         )
@@ -802,11 +831,16 @@ Write a complete business insight based only on the supplied information."""
         # 3. OLLAMA REQUEST
         # ----------------------------------------------------
 
-        response = _http_client.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
+        response = _get_http_client().post(
+            f"{OLLAMA_BASE_URL}/api/chat",
             json={
                 "model": OLLAMA_MODEL,
-                "prompt": prompt,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
                 "stream": False,
                 "keep_alive": "10m",
                 "options": {
@@ -821,12 +855,17 @@ Write a complete business insight based only on the supplied information."""
         response_data = response.json()
 
         if not isinstance(response_data, dict):
-            raise ValueError("Unexpected Ollama generate response.")
+            raise ValueError("Unexpected Ollama chat response.")
 
-        raw_generated = response_data.get("response", "")
+        message_data = response_data.get("message")
+
+        if not isinstance(message_data, dict):
+            raise ValueError("Missing Ollama message object.")
+
+        raw_generated = message_data.get("content", "")
 
         if not isinstance(raw_generated, str):
-            raise ValueError("Ollama response field must be text.")
+            raise ValueError("Ollama message content must be text.")
 
         generated = raw_generated.strip()
 
@@ -947,6 +986,16 @@ Write a complete business insight based only on the supplied information."""
             status="unavailable",
             answer=None,
             reason="Ollama request timed out.",
+        )
+
+    except httpx.HTTPStatusError as exc:
+        result = _make_result(
+            status="unavailable",
+            answer=None,
+            reason=(
+                f"Ollama API returned HTTP "
+                f"{exc.response.status_code}."
+            ),
         )
 
     except httpx.HTTPError:
@@ -1096,4 +1145,5 @@ def get_inflight_insight_count() -> int:
 def close_ollama_client() -> None:
     """Close the reusable HTTP client during application shutdown."""
 
-    _http_client.close()
+    if not _http_client.is_closed:
+        _http_client.close()
