@@ -1,0 +1,25 @@
+ORBIT BUSINESS REPORT - 2024
+
+Company: ORBIT Retail Analytics
+
+Revenue:
+Total annual revenue for 2024 was INR 50,00,000.
+Q1 revenue was INR 10,00,000.
+Q2 revenue was INR 12,00,000.
+Q3 revenue was INR 13,00,000.
+Q4 revenue was INR 15,00,000.
+
+Products:
+Product Alpha generated INR 20,00,000.
+Product Beta generated INR 18,00,000.
+Product Gamma generated INR 12,00,000.
+
+Customers:
+Total active customers: 1250.
+New customers acquired in 2024: 350.
+Customer retention rate: 85%.
+
+Business Insight:
+Revenue increased throughout 2024.
+Q4 was the strongest quarter.
+Product Alpha was the highest revenue contributor.

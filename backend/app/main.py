@@ -2,6 +2,7 @@
 import logging
 import os
 import time
+
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ from .database import initialize_database, get_schema
 from .schemas import AskRequest
 from .agents import execute_workflow, EXAMPLES
 from .auth_routes import router as auth_router
+from .rag.routes import router as rag_router
+from .rag.answer_generator import close_rag_http_client
 from .ollama_client import check_ollama, close_ollama_client
 
 
@@ -59,6 +62,7 @@ class InMemoryRateLimiter:
         self,
         client_id: str,
     ) -> tuple[bool, int, int]:
+
         now = time.monotonic()
 
         with self._lock:
@@ -98,7 +102,7 @@ class InMemoryRateLimiter:
             return True, 0, remaining
 
     def _remove_expired_clients(self, now: float) -> None:
-        """Remove inactive clients when the tracking limit is reached."""
+        """Remove inactive clients when tracking limit is reached."""
 
         expired_clients = [
             client_id
@@ -120,7 +124,7 @@ rate_limiter = InMemoryRateLimiter(
 
 
 def _get_client_identifier(request: Request) -> str:
-    """Get the direct client IP without trusting forwarded headers."""
+    """Get direct client IP without trusting forwarded headers."""
 
     if request.client is None:
         return "unknown"
@@ -143,13 +147,28 @@ async def lifespan(app: FastAPI):
         yield
 
     finally:
+        # Close analytics Ollama HTTP client.
         try:
             close_ollama_client()
-            logger.info("Ollama HTTP client closed successfully.")
+            logger.info(
+                "Analytics Ollama HTTP client closed successfully."
+            )
 
         except Exception:
             logger.exception(
-                "Failed to close the Ollama HTTP client."
+                "Failed to close the analytics Ollama HTTP client."
+            )
+
+        # Close RAG Ollama HTTP client independently.
+        try:
+            close_rag_http_client()
+            logger.info(
+                "RAG HTTP client closed successfully."
+            )
+
+        except Exception:
+            logger.exception(
+                "Failed to close the RAG HTTP client."
             )
 
 
@@ -161,15 +180,23 @@ app = FastAPI(
     title="ORBIT Analytics Agent API",
     description=(
         "Local-first natural-language analytics workflow "
-        "with read-only SQL execution and local AI support."
+        "with read-only SQL execution, local AI and "
+        "retrieval-augmented generation."
     ),
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
 
-# Register authentication endpoints.
+# ============================================================
+# ROUTER REGISTRATION
+# ============================================================
+
+# Authentication endpoints
 app.include_router(auth_router)
+
+# Retrieval-Augmented Generation endpoints
+app.include_router(rag_router)
 
 
 # ============================================================
@@ -180,7 +207,9 @@ _DEFAULT_ORIGINS = (
     "http://localhost:5173,"
     "http://127.0.0.1:5173,"
     "http://localhost:5174,"
-    "http://127.0.0.1:5174"
+    "http://127.0.0.1:5174,"
+    "http://localhost:5175,"
+    "http://127.0.0.1:5175"
 )
 
 _allowed_origins = [
@@ -390,6 +419,7 @@ def root():
         "ai_health": "/api/ai/health",
         "performance": "/api/performance",
         "authentication": "/api/auth",
+        "rag": "/api/rag",
     }
 
 
@@ -456,7 +486,7 @@ def history():
 
 @app.get("/api/performance")
 def performance():
-    """Return aggregate API, SQL, AI, and cache metrics."""
+    """Return aggregate API, SQL, AI and cache metrics."""
 
     return get_performance_snapshot()
 

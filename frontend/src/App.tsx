@@ -37,12 +37,14 @@ import {
   Zap,
   CircleHelp,
 } from 'lucide-react'
+import { useAuth } from './AuthGate'
 
 const AnalyticsChart = lazy(() => import('./components/AnalyticsChart'))
+const RagPanel = lazy(() => import('./components/RagPanel'))
 
 const API = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 
-type Page = 'Analytics studio' | 'Data sources' | 'SQL explorer' | 'Performance'
+type Page = 'Analytics studio' | 'Data sources' | 'SQL explorer' | 'Performance' | 'Document intelligence'
 type ResultTab = 'visual' | 'table' | 'sql'
 type Health = 'checking' | 'online' | 'offline'
 
@@ -146,6 +148,9 @@ const examples = [
 ]
 
 export default function App() {
+  const { user, logout } = useAuth()
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false)
+
   const [question, setQuestion] = useState('')
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [loading, setLoading] = useState(false)
@@ -570,6 +575,13 @@ export default function App() {
               onClick={() => selectNavigation('Performance')}
             />
 
+            <NavButton
+              icon={<Sparkles />}
+              name="Document intelligence"
+              active={activeNav === 'Document intelligence'}
+              onClick={() => selectNavigation('Document intelligence')}
+            />
+
             <button className="nav" disabled title="Coming soon">
               <Layers3 />
               Agent workflows
@@ -656,12 +668,75 @@ export default function App() {
             </span>
 
             <CircleHelp />
-            <div className="avatar">NK</div>
+            <div style={{ position: 'relative' }}>
+              <button
+                type="button"
+                className="avatar"
+                title="Open account menu"
+                aria-label="Open account menu"
+                aria-expanded={profileMenuOpen}
+                onClick={() => setProfileMenuOpen((open) => !open)}
+                style={{ border: 'none', cursor: 'pointer' }}
+              >
+                {user?.email?.slice(0, 2).toUpperCase() ?? "OR"}
+              </button>
+
+              {profileMenuOpen && (
+                <div
+                  role="menu"
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 12px)',
+                    right: 0,
+                    zIndex: 1000,
+                    width: 230,
+                    padding: 12,
+                    border: '1px solid #29344a',
+                    borderRadius: 12,
+                    background: '#111827',
+                    boxShadow: '0 16px 40px rgba(0,0,0,0.4)',
+                  }}
+                >
+                  <div style={{ padding: '8px 9px 12px', borderBottom: '1px solid #29344a', marginBottom: 8 }}>
+                    <div style={{ color: '#f8fafc', fontSize: 13, fontWeight: 600 }}>Signed in</div>
+                    <div style={{ color: '#94a3b8', fontSize: 11, marginTop: 4, overflowWrap: 'anywhere' }}>
+                      {user?.email ?? 'ORBIT account'}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={logout}
+                    style={{
+                      width: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 9,
+                      padding: '10px 9px',
+                      border: 0,
+                      borderRadius: 8,
+                      background: 'transparent',
+                      color: '#fca5a5',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: 13,
+                    }}
+                  >
+                    <LockKeyhole size={15} />
+                    Logout
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
         <div className="content">
-          {activeNav === 'Performance' ? (
+          {activeNav === 'Document intelligence' ? (
+            <Suspense fallback={<div className="empty loading"><Loader2 className="spin" /><h3>Loading Document Intelligence</h3><p>Preparing the RAG workspace...</p></div>}>
+              <RagPanel />
+            </Suspense>
+          ) : activeNav === 'Performance' ? (
             <PerformanceDashboard
               data={performance}
               loading={performanceLoading}
