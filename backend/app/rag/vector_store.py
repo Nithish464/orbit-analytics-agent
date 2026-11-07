@@ -29,12 +29,23 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-VECTOR_DB_PATH = Path(
-    os.getenv(
-        "ORBIT_VECTOR_DB_PATH",
-        str(BASE_DIR / "data" / "chroma"),
+# Set ORBIT_VECTOR_DB_PATH to a persistent mounted directory in production.
+# Example for a Render Persistent Disk mounted at /var/data:
+# ORBIT_VECTOR_DB_PATH=/var/data/orbit/chroma
+#
+# On local development, the default remains backend/data/chroma.
+_raw_vector_db_path = os.getenv(
+    "ORBIT_VECTOR_DB_PATH",
+    str(BASE_DIR / "data" / "chroma"),
+).strip()
+
+if not _raw_vector_db_path:
+    raise RuntimeError(
+        "ORBIT_VECTOR_DB_PATH cannot be empty. "
+        "Set it to a writable directory for ChromaDB persistence."
     )
-).expanduser()
+
+VECTOR_DB_PATH = Path(_raw_vector_db_path).expanduser().resolve()
 
 COLLECTION_NAME = os.getenv(
     "ORBIT_COLLECTION_NAME",
@@ -80,11 +91,13 @@ class OrbitVectorStore:
         persist_directory: Optional[str] = None,
         collection_name: str = COLLECTION_NAME,
     ):
-        self.persist_directory = Path(
+        configured_path = (
             persist_directory
-            if persist_directory
+            if persist_directory is not None
             else VECTOR_DB_PATH
-        ).expanduser()
+        )
+
+        self.persist_directory = Path(configured_path).expanduser().resolve()
 
         if not collection_name.strip():
             raise ValueError(
