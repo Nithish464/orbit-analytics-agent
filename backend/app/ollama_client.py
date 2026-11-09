@@ -13,78 +13,21 @@ import httpx
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION — GOOGLE GEMINI FREE TIER
 # ============================================================
 
-OLLAMA_BASE_URL = os.getenv(
-    "OLLAMA_BASE_URL",
-    "http://localhost:11434",
-).rstrip("/")
-
-OLLAMA_MODEL = os.getenv(
-    "OLLAMA_MODEL",
-    "qwen2.5:1.5b",
-)
-
-# Optional Bearer token for hosted Ollama-compatible endpoints.
-# Leave OLLAMA_API_KEY unset for local Ollama.
-OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
-
-OLLAMA_HEADERS = (
-    {"Authorization": f"Bearer {OLLAMA_API_KEY}"}
-    if OLLAMA_API_KEY
-    else {}
-)
-
-def _get_positive_float_env(name: str, default: float) -> float:
-    """Read a positive floating-point setting from the environment."""
-
-    try:
-        value = float(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-    return value if value > 0 else default
-
-
-OLLAMA_TIMEOUT = _get_positive_float_env("OLLAMA_TIMEOUT", 25.0)
-OLLAMA_CONNECT_TIMEOUT = _get_positive_float_env(
-    "OLLAMA_CONNECT_TIMEOUT",
-    3.0,
-)
-OLLAMA_POOL_TIMEOUT = _get_positive_float_env(
-    "OLLAMA_POOL_TIMEOUT",
-    5.0,
-)
+GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 MAX_RESPONSE_LENGTH = 1500
 MAX_CONTEXT_ROWS = 10
-NUM_PREDICT = 128
-
+MAX_OUTPUT_TOKENS = 256
 CACHE_TTL_SECONDS = 300
 CACHE_MAX_ENTRIES = 128
 
-DIMENSION_KEYS = {
-    "status",
-    "category",
-    "region",
-    "product",
-    "month",
-    "year",
-}
-
-METRIC_KEY_HINTS = (
-    "count",
-    "revenue",
-    "sales",
-    "amount",
-    "total",
-    "quantity",
-    "average",
-    "avg",
-    "aov",
-    "value",
-)
+DIMENSION_KEYS = {"status", "category", "region", "product", "month", "year"}
+METRIC_KEY_HINTS = ("count", "revenue", "sales", "amount", "total", "quantity", "average", "avg", "aov", "value")
 
 
 # ============================================================
@@ -92,17 +35,12 @@ METRIC_KEY_HINTS = (
 # ============================================================
 
 _http_client = httpx.Client(
-    timeout=httpx.Timeout(
-        timeout=OLLAMA_TIMEOUT,
-        connect=OLLAMA_CONNECT_TIMEOUT,
-        pool=OLLAMA_POOL_TIMEOUT,
-    ),
-    limits=httpx.Limits(
-        max_connections=10,
-        max_keepalive_connections=5,
-        keepalive_expiry=30.0,
-    ),
-    headers=OLLAMA_HEADERS,
+    timeout=httpx.Timeout(timeout=30.0, connect=8.0, pool=5.0),
+    limits=httpx.Limits(max_connections=10, max_keepalive_connections=5, keepalive_expiry=30.0),
+    headers={
+        "Content-Type": "application/json",
+        **({"x-goog-api-key": GEMINI_API_KEY} if GEMINI_API_KEY else {}),
+    },
 )
 
 
@@ -128,7 +66,7 @@ def _make_cache_key(
     """
 
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": GEMINI_MODEL,
         "question": question.strip(),
         "rows": rows,
         "deterministic_answer": deterministic_answer,
@@ -237,77 +175,38 @@ def get_insight_cache_stats() -> dict:
 
 
 # ============================================================
-# OLLAMA HEALTH CHECK
+# GEMINI HEALTH CHECK — legacy function name retained for compatibility
 # ============================================================
 
 def check_ollama() -> dict:
-    """Check Ollama connectivity and model availability."""
-
+    """Check Gemini API credentials and configured model availability."""
+    if not GEMINI_API_KEY:
+        return {"status": "not_configured", "service": "gemini", "model": GEMINI_MODEL,
+                "model_available": False, "available_models": [],
+                "detail": "GEMINI_API_KEY is not configured."}
     try:
-        response = _http_client.get(
-            f"{OLLAMA_BASE_URL}/api/tags",
-            timeout=httpx.Timeout(3.0, connect=2.0),
-        )
+        response = _http_client.get(f"{GEMINI_BASE_URL}/models", timeout=httpx.Timeout(12.0, connect=5.0))
         response.raise_for_status()
-
         payload = response.json()
-
-        if not isinstance(payload, dict):
-            raise ValueError("Unexpected Ollama tags response.")
-
-        models = payload.get("models", [])
-
-        if not isinstance(models, list):
-            raise ValueError("Invalid Ollama models list.")
-
-        available_models = [
-            model.get("name", "")
-            for model in models
-            if isinstance(model, dict)
-            and isinstance(model.get("name", ""), str)
-        ]
-
-        model_available = any(
-            name == OLLAMA_MODEL
-            or name.startswith(f"{OLLAMA_MODEL}:")
-            for name in available_models
-        )
-
-        return {
-            "status": (
-                "connected"
-                if model_available
-                else "model_not_found"
-            ),
-            "service": "ollama",
-            "model": OLLAMA_MODEL,
-            "model_available": model_available,
-            "available_models": available_models,
-        }
-
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        names = [item.get("name", "").removeprefix("models/") for item in models
+                 if isinstance(item, dict) and isinstance(item.get("name", ""), str)]
+        available = GEMINI_MODEL in names
+        return {"status": "connected" if available else "model_not_found",
+                "service": "gemini", "model": GEMINI_MODEL,
+                "model_available": available, "available_models": names}
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        return {"status": "authentication_error" if code in (401, 403) else "http_error",
+                "service": "gemini", "model": GEMINI_MODEL,
+                "model_available": False, "available_models": [],
+                "detail": f"Gemini model-list request returned HTTP {code}."}
     except httpx.TimeoutException:
-        return {
-            "status": "timeout",
-            "service": "ollama",
-            "model": OLLAMA_MODEL,
-            "model_available": False,
-        }
-
-    except httpx.HTTPError:
-        return {
-            "status": "offline",
-            "service": "ollama",
-            "model": OLLAMA_MODEL,
-            "model_available": False,
-        }
-
-    except (ValueError, TypeError):
-        return {
-            "status": "error",
-            "service": "ollama",
-            "model": OLLAMA_MODEL,
-            "model_available": False,
-        }
+        return {"status": "timeout", "service": "gemini", "model": GEMINI_MODEL,
+                "model_available": False, "available_models": []}
+    except (httpx.HTTPError, ValueError, TypeError):
+        return {"status": "offline", "service": "gemini", "model": GEMINI_MODEL,
+                "model_available": False, "available_models": []}
 
 
 # ============================================================
@@ -727,7 +626,7 @@ def _generate_business_insight_uncached(
     deterministic_answer: str,
 ) -> dict:
     """
-    Generate and validate business insights using local Ollama.
+    Generate and validate business insights using Google Gemini.
 
     Status values:
         accepted
@@ -799,42 +698,48 @@ EXISTING VERIFIED SUMMARY:
 Write a complete business insight based only on the supplied information."""
 
         # ----------------------------------------------------
-        # 3. OLLAMA REQUEST
+        # 3. GEMINI REQUEST
         # ----------------------------------------------------
 
+        if not GEMINI_API_KEY:
+            return _make_result(status="unavailable", answer=None,
+                                reason="GEMINI_API_KEY is not configured on the server.")
+
         response = _http_client.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
+            f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent",
             json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "keep_alive": "10m",
-                "options": {
-                    "temperature": 0,
-                    "num_predict": NUM_PREDICT,
-                },
+                "systemInstruction": {"parts": [{"text": "You are ORBIT, a careful business analytics assistant. Follow the supplied verified data strictly."}]},
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": MAX_OUTPUT_TOKENS},
             },
         )
-
         response.raise_for_status()
-
         response_data = response.json()
-
         if not isinstance(response_data, dict):
-            raise ValueError("Unexpected Ollama generate response.")
+            raise ValueError("Unexpected Gemini generateContent response.")
 
-        raw_generated = response_data.get("response", "")
-
+        candidates = response_data.get("candidates", [])
+        raw_generated = ""
+        if candidates and isinstance(candidates[0], dict):
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", []) if isinstance(content, dict) else []
+            raw_generated = "".join(
+                part.get("text", "") for part in parts
+                if isinstance(part, dict) and isinstance(part.get("text", ""), str)
+            )
+            response_data["done_reason"] = (
+                "length" if candidates[0].get("finishReason") == "MAX_TOKENS"
+                else candidates[0].get("finishReason")
+            )
         if not isinstance(raw_generated, str):
-            raise ValueError("Ollama response field must be text.")
-
+            raise ValueError("Gemini response text must be a string.")
         generated = raw_generated.strip()
 
         if not generated:
             result = _make_result(
                 status="rejected",
                 answer=None,
-                reason="Ollama returned an empty response.",
+                reason="Gemini returned an empty response.",
             )
 
             result["ai_duration_ms"] = round(
@@ -943,25 +848,28 @@ Write a complete business insight based only on the supplied information."""
     # --------------------------------------------------------
 
     except httpx.TimeoutException:
-        result = _make_result(
-            status="unavailable",
-            answer=None,
-            reason="Ollama request timed out.",
-        )
+        result = _make_result(status="unavailable", answer=None,
+                              reason="Gemini request timed out.")
+
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code == 429:
+            reason = "Gemini free-tier rate limit reached. Retry later."
+        elif code in (401, 403):
+            reason = "Gemini API key is invalid or lacks access to this model."
+        elif code == 404:
+            reason = f"Gemini model '{GEMINI_MODEL}' was not found or is unavailable."
+        else:
+            reason = f"Gemini API returned HTTP {code}."
+        result = _make_result(status="unavailable", answer=None, reason=reason)
 
     except httpx.HTTPError:
-        result = _make_result(
-            status="unavailable",
-            answer=None,
-            reason="Ollama HTTP connection failed.",
-        )
+        result = _make_result(status="unavailable", answer=None,
+                              reason="Gemini HTTP connection failed.")
 
     except (ValueError, TypeError, KeyError):
-        result = _make_result(
-            status="unavailable",
-            answer=None,
-            reason="Invalid Ollama response.",
-        )
+        result = _make_result(status="unavailable", answer=None,
+                              reason="Invalid Gemini response.")
 
     result["ai_duration_ms"] = round(
         (time.perf_counter() - started_at) * 1000,
@@ -1034,7 +942,7 @@ def generate_business_insight(
         # Another thread is already generating this exact insight.
         # Wait slightly longer than the configured HTTP request timeout.
         try:
-            shared_result = future.result(timeout=OLLAMA_TIMEOUT + 10.0)
+            shared_result = future.result(timeout=40.0)
             result = shared_result.copy()
             result["cache_hit"] = True
             result["ai_duration_ms"] = 0.0
@@ -1097,3 +1005,7 @@ def close_ollama_client() -> None:
     """Close the reusable HTTP client during application shutdown."""
 
     _http_client.close()
+
+# New provider-friendly aliases. Legacy names above remain for existing imports.
+check_gemini = check_ollama
+close_gemini_client = close_ollama_client
