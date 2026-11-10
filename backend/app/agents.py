@@ -58,13 +58,31 @@ def plan_question(question: str) -> dict[str, Any]:
     if singular_highest:
         limit = 1
 
-    # Identify metric.
-    if "average order value" in q or re.search(r"\baov\b", q):
-        metric = "aov"
+    # Identify whether the user requested multiple headline metrics.
+    # Composite overview questions must return all requested values in one row.
+    asks_revenue = "revenue" in q or "sales" in q
+    asks_orders = any(
+        term in q
+        for term in (
+            "order count",
+            "total orders",
+            "number of orders",
+            "how many orders",
+            "orders",
+        )
+    )
+    asks_aov = "average order value" in q or re.search(r"\\baov\\b", q)
 
+    requested_headline_metrics = sum(
+        (asks_revenue, asks_orders, asks_aov)
+    )
+
+    if requested_headline_metrics >= 2:
+        metric = "overview"
+    elif asks_aov:
+        metric = "aov"
     elif "average revenue" in q or "mean revenue" in q:
         metric = "average_revenue"
-
     elif any(
         term in q
         for term in (
@@ -76,22 +94,10 @@ def plan_question(question: str) -> dict[str, Any]:
         )
     ):
         metric = "customer_spend"
-
-    elif any(
-        term in q
-        for term in (
-            "order count",
-            "number of orders",
-            "how many orders",
-            "orders per",
-            "orders by",
-        )
-    ):
+    elif asks_orders:
         metric = "orders"
-
-    elif "revenue" in q or "sales" in q:
+    elif asks_revenue:
         metric = "revenue"
-
     else:
         metric = "overview"
 
@@ -273,7 +279,11 @@ def build_sql(plan: dict[str, Any]) -> str:
     return (
         "SELECT "
         "ROUND(SUM(oi.quantity * oi.unit_price), 2) AS total_revenue, "
-        "COUNT(DISTINCT o.order_id) AS total_orders "
+        "COUNT(DISTINCT o.order_id) AS total_orders, "
+        "ROUND("
+        "SUM(oi.quantity * oi.unit_price) * 1.0 / "
+        "NULLIF(COUNT(DISTINCT o.order_id), 0), 2"
+        ") AS average_order_value "
         "FROM orders o "
         "JOIN order_items oi ON oi.order_id = o.order_id"
         f"{year_filter}"
@@ -618,14 +628,18 @@ def make_answer(
     if metric == "overview":
         revenue = first.get("total_revenue")
         orders = first.get("total_orders")
+        aov = first.get("average_order_value")
 
         if revenue is None or orders is None:
             return "No matching records were found for this question."
 
-        return (
+        answer = (
             f"Dataset overview: total revenue is {_money(revenue)} "
             f"across {orders} orders."
         )
+        if aov is not None:
+            answer += f" Average order value is {_money(aov)}."
+        return answer
 
     return (
         f"Returned {len(rows)} records for your analytics question."
@@ -849,3 +863,4 @@ def execute_workflow(question: str) -> dict[str, Any]:
         "cache_hit": cache_hit,
         "mode": mode,
     }
+ 

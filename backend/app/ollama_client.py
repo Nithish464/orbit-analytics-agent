@@ -16,13 +16,43 @@ import httpx
 # CONFIGURATION — GOOGLE GEMINI FREE TIER
 # ============================================================
 
-GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
+GEMINI_BASE_URL = os.getenv(
+    "GEMINI_BASE_URL",
+    "https://generativelanguage.googleapis.com/v1beta",
+).rstrip("/")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+
+# Ordered fallback models. Override this list in .env with comma-separated
+# model IDs. Models unavailable to this API key are skipped automatically.
+_DEFAULT_FALLBACK_MODELS = (
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+)
+GEMINI_FALLBACK_MODELS = tuple(
+    model.strip()
+    for model in os.getenv(
+        "GEMINI_FALLBACK_MODELS",
+        ",".join(_DEFAULT_FALLBACK_MODELS),
+    ).split(",")
+    if model.strip()
+)
+
+
+def _configured_models() -> list[str]:
+    """Return unique primary and fallback models in priority order."""
+    return list(dict.fromkeys(
+        model for model in (GEMINI_MODEL, *GEMINI_FALLBACK_MODELS) if model
+    ))
 
 MAX_RESPONSE_LENGTH = 1500
 MAX_CONTEXT_ROWS = 10
-MAX_OUTPUT_TOKENS = 256
+MAX_OUTPUT_TOKENS = 768
 CACHE_TTL_SECONDS = 300
 CACHE_MAX_ENTRIES = 128
 
@@ -66,7 +96,7 @@ def _make_cache_key(
     """
 
     payload = {
-        "model": GEMINI_MODEL,
+        "models": _configured_models(),
         "question": question.strip(),
         "rows": rows,
         "deterministic_answer": deterministic_answer,
@@ -191,10 +221,18 @@ def check_ollama() -> dict:
         models = payload.get("models", []) if isinstance(payload, dict) else []
         names = [item.get("name", "").removeprefix("models/") for item in models
                  if isinstance(item, dict) and isinstance(item.get("name", ""), str)]
-        available = GEMINI_MODEL in names
-        return {"status": "connected" if available else "model_not_found",
-                "service": "gemini", "model": GEMINI_MODEL,
-                "model_available": available, "available_models": names}
+        configured = _configured_models()
+        available_configured = [model for model in configured if model in names]
+        primary_available = GEMINI_MODEL in names
+        return {
+            "status": "connected" if available_configured else "model_not_found",
+            "service": "gemini",
+            "model": GEMINI_MODEL,
+            "model_available": primary_available,
+            "configured_models": configured,
+            "models_listed_by_api": available_configured,
+            "available_models": names,
+        }
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         return {"status": "authentication_error" if code in (401, 403) else "http_error",
@@ -705,48 +743,74 @@ Write a complete business insight based only on the supplied information."""
             return _make_result(status="unavailable", answer=None,
                                 reason="GEMINI_API_KEY is not configured on the server.")
 
-        response = _http_client.post(
-            f"{GEMINI_BASE_URL}/models/{GEMINI_MODEL}:generateContent",
-            json={
-                "systemInstruction": {"parts": [{"text": "You are ORBIT, a careful business analytics assistant. Follow the supplied verified data strictly."}]},
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": MAX_OUTPUT_TOKENS},
-            },
-        )
-        response.raise_for_status()
-        response_data = response.json()
-        if not isinstance(response_data, dict):
-            raise ValueError("Unexpected Gemini generateContent response.")
+        response_data = None
+        generated = ""
+        selected_model = None
+        last_http_error = None
 
-        candidates = response_data.get("candidates", [])
-        raw_generated = ""
-        if candidates and isinstance(candidates[0], dict):
-            content = candidates[0].get("content", {})
-            parts = content.get("parts", []) if isinstance(content, dict) else []
-            raw_generated = "".join(
-                part.get("text", "") for part in parts
-                if isinstance(part, dict) and isinstance(part.get("text", ""), str)
-            )
-            response_data["done_reason"] = (
-                "length" if candidates[0].get("finishReason") == "MAX_TOKENS"
-                else candidates[0].get("finishReason")
-            )
-        if not isinstance(raw_generated, str):
-            raise ValueError("Gemini response text must be a string.")
-        generated = raw_generated.strip()
+        for model in _configured_models():
+            try:
+                response = _http_client.post(
+                    f"{GEMINI_BASE_URL}/models/{model}:generateContent",
+                    json={
+                        "systemInstruction": {
+                            "parts": [{
+                                "text": (
+                                    "You are ORBIT, a careful business analytics "
+                                    "assistant. Follow the supplied verified data strictly."
+                                )
+                            }]
+                        },
+                        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature": 0.1,
+                            "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                        },
+                    },
+                )
+                response.raise_for_status()
+                response_data = response.json()
+                if not isinstance(response_data, dict):
+                    raise ValueError("Unexpected Gemini generateContent response.")
 
-        if not generated:
-            result = _make_result(
-                status="rejected",
-                answer=None,
-                reason="Gemini returned an empty response.",
-            )
+                candidates = response_data.get("candidates", [])
+                raw_generated = ""
+                if candidates and isinstance(candidates[0], dict):
+                    content = candidates[0].get("content", {})
+                    parts = content.get("parts", []) if isinstance(content, dict) else []
+                    raw_generated = "".join(
+                        part.get("text", "")
+                        for part in parts
+                        if isinstance(part, dict)
+                        and isinstance(part.get("text", ""), str)
+                    )
+                    response_data["done_reason"] = (
+                        "length"
+                        if candidates[0].get("finishReason") == "MAX_TOKENS"
+                        else candidates[0].get("finishReason")
+                    )
 
-            result["ai_duration_ms"] = round(
-                (time.perf_counter() - started_at) * 1000,
-                2,
-            )
-            return result
+                if not isinstance(raw_generated, str):
+                    raise ValueError("Gemini response text must be a string.")
+
+                generated = raw_generated.strip()
+                selected_model = model
+                break
+
+            except httpx.HTTPStatusError as exc:
+                last_http_error = exc
+                status_code = exc.response.status_code
+
+                # Try the next configured model for model-specific access,
+                # quota/rate-limit, or temporary provider errors.
+                if status_code in (404, 429, 500, 502, 503, 504):
+                    continue
+                raise
+
+        if selected_model is None:
+            if last_http_error is not None:
+                raise last_http_error
+            raise httpx.HTTPError("No Gemini models are configured.")
 
         # ----------------------------------------------------
         # 4. RESPONSE VALIDATION
@@ -759,6 +823,7 @@ Write a complete business insight based only on the supplied information."""
                 reason="AI response exceeded the maximum allowed length.",
             )
 
+            result["model"] = selected_model
             result["ai_duration_ms"] = round(
                 (time.perf_counter() - started_at) * 1000,
                 2,
@@ -775,6 +840,7 @@ Write a complete business insight based only on the supplied information."""
                 reason="AI response appears incomplete or was truncated.",
             )
 
+            result["model"] = selected_model
             result["ai_duration_ms"] = round(
                 (time.perf_counter() - started_at) * 1000,
                 2,
@@ -795,6 +861,7 @@ Write a complete business insight based only on the supplied information."""
                 unsupported_numbers=unsupported,
             )
 
+            result["model"] = selected_model
             result["ai_duration_ms"] = round(
                 (time.perf_counter() - started_at) * 1000,
                 2,
@@ -836,6 +903,7 @@ Write a complete business insight based only on the supplied information."""
             ),
         )
 
+        result["model"] = selected_model
         result["ai_duration_ms"] = round(
             (time.perf_counter() - started_at) * 1000,
             2,
@@ -858,7 +926,10 @@ Write a complete business insight based only on the supplied information."""
         elif code in (401, 403):
             reason = "Gemini API key is invalid or lacks access to this model."
         elif code == 404:
-            reason = f"Gemini model '{GEMINI_MODEL}' was not found or is unavailable."
+            reason = (
+                "All configured Gemini models were unavailable: "
+                + ", ".join(_configured_models())
+            )
         else:
             reason = f"Gemini API returned HTTP {code}."
         result = _make_result(status="unavailable", answer=None, reason=reason)

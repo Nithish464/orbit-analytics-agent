@@ -2,6 +2,13 @@
 import logging
 import os
 import time
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load backend/.env before importing application modules that read
+# environment variables during import (including the Gemini client).
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from collections import deque
 from contextlib import asynccontextmanager
