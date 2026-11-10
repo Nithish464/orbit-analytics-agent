@@ -510,17 +510,19 @@ def _validate_semantic_claims(
     answer: str,
     rows: list[dict],
 ) -> list[str]:
-    """Validate metric-to-dimension associations without crossing labels.
+    """Validate metric-to-dimension associations without false date matches.
 
-    A metric after a dimension label is associated with that label up to the
-    next dimension label. If the metric appears before its label, the nearest
-    preceding metric is used instead. This avoids comparing a month with the
-    following month's value in compact lists and tables.
+    Date labels such as YYYY-MM are intentionally excluded from proximity
+    matching because compact date strings can cause nearby numbers to be
+    associated with the wrong month. The separate numerical validator still
+    verifies that generated numbers exist in trusted rows or the summary.
+    Non-date dimensions (category, region, product, status, etc.) retain
+    their metric-association checks.
     """
-
-    number_pattern = re.compile(r"(?<![\\w.])-?\\d[\\d,]*(?:\\.\\d+)?")
-    issues = []
-    label_records = []
+    number_pattern = re.compile(r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?")
+    date_label_pattern = re.compile(r"^\d{4}[-/]\d{1,2}$")
+    issues: list[str] = []
+    label_records: list[tuple[str, set[str]]] = []
 
     for row in rows:
         if not isinstance(row, dict):
@@ -534,26 +536,39 @@ def _validate_semantic_claims(
         for key, value in row.items():
             if str(key).lower() not in DIMENSION_KEYS:
                 continue
-            if isinstance(value, str) and value.strip():
-                label_records.append((value.strip(), expected_numbers))
+            if not isinstance(value, str) or not value.strip():
+                continue
 
-    label_occurrences = []
+            label = value.strip()
+
+            # Skip compact month/date labels; numeric validation remains active.
+            if date_label_pattern.fullmatch(label):
+                continue
+
+            label_records.append((label, expected_numbers))
+
+    label_occurrences: list[dict] = []
     for label, expected_numbers in label_records:
-        pattern = re.compile(rf"(?<!\\w){re.escape(label)}(?!\\w)", re.IGNORECASE)
+        pattern = re.compile(
+            rf"(?<!\w){re.escape(label)}(?!\w)",
+            re.IGNORECASE,
+        )
         for match in pattern.finditer(answer):
-            label_occurrences.append({
-                "start": match.start(),
-                "end": match.end(),
-                "label": label,
-                "expected": expected_numbers,
-            })
+            label_occurrences.append(
+                {
+                    "start": match.start(),
+                    "end": match.end(),
+                    "label": label,
+                    "expected": expected_numbers,
+                }
+            )
 
     if not label_occurrences:
         return issues
 
     label_occurrences.sort(key=lambda item: (item["start"], item["end"]))
 
-    numeric_occurrences = []
+    numeric_occurrences: list[dict] = []
     for number_match in number_pattern.finditer(answer):
         overlaps_label = any(
             number_match.start() < label_item["end"]
@@ -565,11 +580,13 @@ def _validate_semantic_claims(
 
         normalized = _normalize_number(number_match.group())
         if normalized is not None:
-            numeric_occurrences.append({
-                "start": number_match.start(),
-                "end": number_match.end(),
-                "value": normalized,
-            })
+            numeric_occurrences.append(
+                {
+                    "start": number_match.start(),
+                    "end": number_match.end(),
+                    "value": normalized,
+                }
+            )
 
     for index, label_item in enumerate(label_occurrences):
         previous_label_end = (
@@ -581,9 +598,10 @@ def _validate_semantic_claims(
             else len(answer)
         )
 
-        # Prefer a metric stated after this label and before the next label.
+        # Prefer a metric after this label and before the next dimension label.
         following_numbers = [
-            item for item in numeric_occurrences
+            item
+            for item in numeric_occurrences
             if label_item["end"] <= item["start"]
             and item["end"] <= next_label_start
         ]
@@ -594,14 +612,16 @@ def _validate_semantic_claims(
                 key=lambda item: item["start"] - label_item["end"],
             )
         else:
-            # Also support phrasing such as "$835 in 2024-01".
+            # Also support phrasing such as "$100 in North".
             preceding_numbers = [
-                item for item in numeric_occurrences
+                item
+                for item in numeric_occurrences
                 if previous_label_end <= item["start"]
                 and item["end"] <= label_item["start"]
             ]
             if not preceding_numbers:
                 continue
+
             chosen = min(
                 preceding_numbers,
                 key=lambda item: label_item["start"] - item["end"],
