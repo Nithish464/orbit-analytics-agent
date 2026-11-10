@@ -23,16 +23,14 @@ GEMINI_BASE_URL = os.getenv(
     "GEMINI_BASE_URL",
     "https://generativelanguage.googleapis.com/v1beta",
 ).rstrip("/")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 # Ordered fallback models. Override this list in .env with comma-separated
 # model IDs. Models unavailable to this API key are skipped automatically.
 _DEFAULT_FALLBACK_MODELS = (
-    # Keep this list short: the primary is attempted first, then one fallback.
-    # Both IDs have been listed by this project's Gemini /models endpoint.
+    # Use the stable 2.5 Flash model first; keep one newer model as fallback.
     "gemini-3.5-flash",
-    "gemini-2.5-flash",
 )
 GEMINI_FALLBACK_MODELS = tuple(
     model.strip()
@@ -52,9 +50,8 @@ def _configured_models() -> list[str]:
 
 MAX_RESPONSE_LENGTH = 1200
 MAX_CONTEXT_ROWS = 10
-# Business insights are short summaries; a smaller output budget reduces
-# generation time while leaving room for a complete, validated answer.
-MAX_OUTPUT_TOKENS = 1024
+# Leave enough output budget for complete responses, including model thinking tokens.
+MAX_OUTPUT_TOKENS = 2048
 # Bound fallback work. A long list of models can multiply request latency.
 MAX_MODEL_ATTEMPTS = 2
 CACHE_TTL_SECONDS = 300
