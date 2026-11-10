@@ -71,7 +71,7 @@ def plan_question(question: str) -> dict[str, Any]:
             "orders",
         )
     )
-    asks_aov = "average order value" in q or re.search(r"\\baov\\b", q)
+    asks_aov = "average order value" in q or bool(re.search(r"\baov\b", q))
 
     requested_headline_metrics = sum(
         (asks_revenue, asks_orders, asks_aov)
@@ -863,4 +863,3 @@ def execute_workflow(question: str) -> dict[str, Any]:
         "cache_hit": cache_hit,
         "mode": mode,
     }
- 
