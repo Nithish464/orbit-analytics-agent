@@ -60,8 +60,8 @@ def plan_question(question: str) -> dict[str, Any]:
 
     # Identify whether the user requested multiple headline metrics.
     # Composite overview questions must return all requested values in one row.
-    asks_revenue = "revenue" in q or "sales" in q
-    asks_orders = any(
+    asks_revenue = bool("revenue" in q or "sales" in q)
+    asks_orders = bool(any(
         term in q
         for term in (
             "order count",
@@ -70,11 +70,14 @@ def plan_question(question: str) -> dict[str, Any]:
             "how many orders",
             "orders",
         )
+    ))
+    asks_aov = bool(
+        "average order value" in q or re.search(r"\baov\b", q)
     )
-    asks_aov = "average order value" in q or bool(re.search(r"\baov\b", q))
 
+    # Convert flags to integers so sum() never receives None.
     requested_headline_metrics = sum(
-        (asks_revenue, asks_orders, asks_aov)
+        (int(asks_revenue), int(asks_orders), int(asks_aov))
     )
 
     if requested_headline_metrics >= 2:
