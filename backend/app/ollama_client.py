@@ -23,17 +23,14 @@ GEMINI_BASE_URL = os.getenv(
     "GEMINI_BASE_URL",
     "https://generativelanguage.googleapis.com/v1beta",
 ).rstrip("/")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 # Ordered fallback models. Override this list in .env with comma-separated
 # model IDs. Models unavailable to this API key are skipped automatically.
 _DEFAULT_FALLBACK_MODELS = (
-    # Keep fallbacks to model IDs that were confirmed in this project's
-    # Gemini /models response. The primary model is tried first.
-    "gemini-2.5-flash",
-    "gemini-3-flash",
-    "gemini-3.1-flash-lite",
+    # Keep the fallback list short and limited to model IDs observed in
+    # this project's Gemini /models response. Primary is tried first.
     "gemini-3.5-flash",
 )
 GEMINI_FALLBACK_MODELS = tuple(
@@ -54,10 +51,11 @@ def _configured_models() -> list[str]:
 
 MAX_RESPONSE_LENGTH = 1200
 MAX_CONTEXT_ROWS = 10
-# Business insights are short summaries; a smaller output budget reduces
-# generation time while leaving room for a complete, validated answer.
-MAX_OUTPUT_TOKENS = 512
-# Bound fallback work. A long list of models can multiply request latency.
+# Keep each generation attempt bounded. Two attempts therefore have a
+# predictable upper bound instead of consuming 36+ seconds on two timeouts.
+GEMINI_REQUEST_TIMEOUT_SECONDS = 12.0
+GEMINI_CONNECT_TIMEOUT_SECONDS = 5.0
+MAX_OUTPUT_TOKENS = 384
 MAX_MODEL_ATTEMPTS = 2
 CACHE_TTL_SECONDS = 300
 CACHE_MAX_ENTRIES = 128
@@ -71,7 +69,7 @@ METRIC_KEY_HINTS = ("count", "revenue", "sales", "amount", "total", "quantity", 
 # ============================================================
 
 _http_client = httpx.Client(
-    timeout=httpx.Timeout(timeout=18.0, connect=5.0, pool=5.0),
+    timeout=httpx.Timeout(timeout=GEMINI_REQUEST_TIMEOUT_SECONDS, connect=GEMINI_CONNECT_TIMEOUT_SECONDS, pool=5.0),
     limits=httpx.Limits(max_connections=10, max_keepalive_connections=5, keepalive_expiry=30.0),
     headers={
         "Content-Type": "application/json",
@@ -87,7 +85,7 @@ _http_client = httpx.Client(
 _insight_cache: OrderedDict[str, dict] = OrderedDict()
 _cache_lock = threading.RLock()
 
-# One Future per active cache key prevents duplicate concurrent Ollama calls.
+# One Future per active cache key prevents duplicate concurrent Gemini calls.
 _inflight_insights: dict[str, Future] = {}
 
 
@@ -718,13 +716,19 @@ Write a complete business insight based only on the supplied information."""
         failures: list[str] = []
         last_status = "rejected"
 
-        # Try the primary model and at most one fallback. This prevents a
-        # long chain of slow/unavailable models from delaying every request.
+        # Try the primary model and at most one fallback. Each attempt has
+        # its own bounded timeout so a slow provider cannot stall the API.
         for model in _configured_models()[:MAX_MODEL_ATTEMPTS]:
             attempted_models.append(model)
+            model_started_at = time.perf_counter()
             try:
                 response = _http_client.post(
                     f"{GEMINI_BASE_URL}/models/{model}:generateContent",
+                    timeout=httpx.Timeout(
+                        timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
+                        connect=GEMINI_CONNECT_TIMEOUT_SECONDS,
+                        pool=5.0,
+                    ),
                     json={
                         "systemInstruction": {
                             "parts": [{
@@ -830,6 +834,7 @@ Write a complete business insight based only on the supplied information."""
                 )
                 result["model"] = model
                 result["attempted_models"] = attempted_models
+                result["model_duration_ms"] = round((time.perf_counter() - model_started_at) * 1000, 2)
                 logger.info(
                     "Gemini answer accepted. model=%s attempts=%s",
                     model,
@@ -841,7 +846,8 @@ Write a complete business insight based only on the supplied information."""
                 return result
 
             except httpx.TimeoutException:
-                failure = f"{model}: request timed out"
+                elapsed_ms = round((time.perf_counter() - model_started_at) * 1000, 2)
+                failure = f"{model}: request timed out after {elapsed_ms} ms"
                 failures.append(failure)
                 logger.warning("Gemini request failed: %s", failure)
                 last_status = "unavailable"
@@ -981,7 +987,7 @@ def generate_business_insight(
         # Another thread is already generating this exact insight.
         # Wait slightly longer than the configured HTTP request timeout.
         try:
-            shared_result = future.result(timeout=40.0)
+            shared_result = future.result(timeout=(MAX_MODEL_ATTEMPTS * GEMINI_REQUEST_TIMEOUT_SECONDS) + 8.0)
             result = shared_result.copy()
             result["cache_hit"] = True
             result["ai_duration_ms"] = 0.0
