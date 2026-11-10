@@ -23,30 +23,41 @@ GEMINI_BASE_URL = os.getenv(
     "GEMINI_BASE_URL",
     "https://generativelanguage.googleapis.com/v1beta",
 ).rstrip("/")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+# Accept a single model ID or a comma-separated ordered list in GEMINI_MODEL.
+# The first ID is primary; remaining IDs are treated as fallbacks.
+_GEMINI_MODEL_ENV = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+_GEMINI_MODEL_IDS = tuple(
+    item.strip().removeprefix("models/")
+    for item in _GEMINI_MODEL_ENV.split(",")
+    if item.strip()
+)
+GEMINI_MODEL = _GEMINI_MODEL_IDS[0] if _GEMINI_MODEL_IDS else "gemini-2.5-flash"
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-# Ordered fallback models. Override this list in .env with comma-separated
-# model IDs. Models unavailable to this API key are skipped automatically.
-_DEFAULT_FALLBACK_MODELS = (
-    # Use the stable 2.5 Flash model first; keep one newer model as fallback.
-    "gemini-3.5-flash",
+# Ordered fallback models. Use comma-separated model IDs in the environment.
+_DEFAULT_FALLBACK_MODELS = ("gemini-3.5-flash",)
+_ENV_FALLBACK_MODELS = os.getenv(
+    "GEMINI_FALLBACK_MODELS",
+    ",".join(_DEFAULT_FALLBACK_MODELS),
 )
 GEMINI_FALLBACK_MODELS = tuple(
-    model.strip()
-    for model in os.getenv(
-        "GEMINI_FALLBACK_MODELS",
-        ",".join(_DEFAULT_FALLBACK_MODELS),
-    ).split(",")
-    if model.strip()
+    item.strip().removeprefix("models/")
+    for item in _ENV_FALLBACK_MODELS.split(",")
+    if item.strip()
 )
 
 
 def _configured_models() -> list[str]:
-    """Return unique primary and fallback models in priority order."""
+    """Return unique primary and fallback model IDs in priority order."""
+    ordered = (*_GEMINI_MODEL_IDS, *GEMINI_FALLBACK_MODELS)
     return list(dict.fromkeys(
-        model for model in (GEMINI_MODEL, *GEMINI_FALLBACK_MODELS) if model
+        model.strip().removeprefix("models/")
+        for model in ordered
+        if model and model.strip()
     ))
+
+
+logger.info("Gemini model order configured: %s", _configured_models())
 
 MAX_RESPONSE_LENGTH = 1200
 MAX_CONTEXT_ROWS = 10
@@ -67,7 +78,7 @@ METRIC_KEY_HINTS = ("count", "revenue", "sales", "amount", "total", "quantity", 
 # ============================================================
 
 _http_client = httpx.Client(
-    timeout=httpx.Timeout(timeout=14.0, connect=5.0, pool=5.0),
+    timeout=httpx.Timeout(timeout=8.0, connect=3.0, pool=3.0),
     limits=httpx.Limits(max_connections=10, max_keepalive_connections=5, keepalive_expiry=30.0),
     headers={
         "Content-Type": "application/json",
@@ -1003,9 +1014,9 @@ def generate_business_insight(
 
     if not is_leader:
         # Another thread is already generating this exact insight.
-        # Wait slightly longer than the configured HTTP request timeout.
+        # Allow a bounded wait for the configured model chain to finish.
         try:
-            shared_result = future.result(timeout=32.0)
+            shared_result = future.result(timeout=60.0)
             result = shared_result.copy()
             result["cache_hit"] = True
             result["ai_duration_ms"] = 0.0
