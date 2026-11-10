@@ -510,107 +510,110 @@ def _validate_semantic_claims(
     answer: str,
     rows: list[dict],
 ) -> list[str]:
-    """Validate numerical associations with business dimensions."""
+    """Validate metric-to-dimension associations without crossing labels.
 
+    A metric after a dimension label is associated with that label up to the
+    next dimension label. If the metric appears before its label, the nearest
+    preceding metric is used instead. This avoids comparing a month with the
+    following month's value in compact lists and tables.
+    """
+
+    number_pattern = re.compile(r"(?<![\\w.])-?\\d[\\d,]*(?:\\.\\d+)?")
     issues = []
-
-    number_pattern = re.compile(
-        r"(?<![\w.])-?\d[\d,]*(?:\.\d+)?"
-    )
+    label_records = []
 
     for row in rows:
         if not isinstance(row, dict):
             continue
 
         expected_numbers = _get_metric_numbers(row)
-        expected_numbers.update(
-            _get_valid_percentages_for_row(row, rows)
-        )
-
+        expected_numbers.update(_get_valid_percentages_for_row(row, rows))
         if not expected_numbers:
             continue
 
         for key, value in row.items():
-            key_lower = str(key).lower()
-
-            if key_lower not in DIMENSION_KEYS:
+            if str(key).lower() not in DIMENSION_KEYS:
                 continue
+            if isinstance(value, str) and value.strip():
+                label_records.append((value.strip(), expected_numbers))
 
-            if not isinstance(value, str):
+    label_occurrences = []
+    for label, expected_numbers in label_records:
+        pattern = re.compile(rf"(?<!\\w){re.escape(label)}(?!\\w)", re.IGNORECASE)
+        for match in pattern.finditer(answer):
+            label_occurrences.append({
+                "start": match.start(),
+                "end": match.end(),
+                "label": label,
+                "expected": expected_numbers,
+            })
+
+    if not label_occurrences:
+        return issues
+
+    label_occurrences.sort(key=lambda item: (item["start"], item["end"]))
+
+    numeric_occurrences = []
+    for number_match in number_pattern.finditer(answer):
+        overlaps_label = any(
+            number_match.start() < label_item["end"]
+            and number_match.end() > label_item["start"]
+            for label_item in label_occurrences
+        )
+        if overlaps_label:
+            continue
+
+        normalized = _normalize_number(number_match.group())
+        if normalized is not None:
+            numeric_occurrences.append({
+                "start": number_match.start(),
+                "end": number_match.end(),
+                "value": normalized,
+            })
+
+    for index, label_item in enumerate(label_occurrences):
+        previous_label_end = (
+            label_occurrences[index - 1]["end"] if index > 0 else 0
+        )
+        next_label_start = (
+            label_occurrences[index + 1]["start"]
+            if index + 1 < len(label_occurrences)
+            else len(answer)
+        )
+
+        # Prefer a metric stated after this label and before the next label.
+        following_numbers = [
+            item for item in numeric_occurrences
+            if label_item["end"] <= item["start"]
+            and item["end"] <= next_label_start
+        ]
+
+        if following_numbers:
+            chosen = min(
+                following_numbers,
+                key=lambda item: item["start"] - label_item["end"],
+            )
+        else:
+            # Also support phrasing such as "$835 in 2024-01".
+            preceding_numbers = [
+                item for item in numeric_occurrences
+                if previous_label_end <= item["start"]
+                and item["end"] <= label_item["start"]
+            ]
+            if not preceding_numbers:
                 continue
-
-            label = value.strip()
-
-            if not label:
-                continue
-
-            label_pattern = re.compile(
-                rf"(?<!\w){re.escape(label)}(?!\w)",
-                re.IGNORECASE,
+            chosen = min(
+                preceding_numbers,
+                key=lambda item: label_item["start"] - item["end"],
             )
 
-            for label_match in label_pattern.finditer(answer):
-                start = max(
-                    0,
-                    label_match.start() - 45,
-                )
-
-                end = min(
-                    len(answer),
-                    label_match.end() + 45,
-                )
-
-                nearby_text = answer[start:end]
-                nearby_numbers = []
-
-                for number_match in number_pattern.finditer(
-                    nearby_text
-                ):
-                    absolute_start = start + number_match.start()
-                    absolute_end = start + number_match.end()
-
-                    # Date-like dimension labels such as "2024-10"
-                    # contain digits that are part of the label itself,
-                    # not business metric values. Do not compare those
-                    # digits with the row's revenue/quantity values.
-                    overlaps_dimension_label = (
-                        absolute_start < label_match.end()
-                        and absolute_end > label_match.start()
-                    )
-                    if overlaps_dimension_label:
-                        continue
-
-                    distance = min(
-                        abs(absolute_start - label_match.end()),
-                        abs(absolute_end - label_match.start()),
-                    )
-
-                    normalized = _normalize_number(
-                        number_match.group()
-                    )
-
-                    if normalized is not None:
-                        nearby_numbers.append(
-                            (distance, normalized)
-                        )
-
-                if not nearby_numbers:
-                    continue
-
-                nearby_numbers.sort(
-                    key=lambda item: item[0]
-                )
-
-                closest_number = nearby_numbers[0][1]
-
-                if closest_number not in expected_numbers:
-                    issue = (
-                        f"Value {closest_number} is incorrectly "
-                        f"associated with '{label}'."
-                    )
-
-                    if issue not in issues:
-                        issues.append(issue)
+        if chosen["value"] not in label_item["expected"]:
+            issue = (
+                f"Value {chosen['value']} is incorrectly "
+                f"associated with '{label_item['label']}'."
+            )
+            if issue not in issues:
+                issues.append(issue)
 
     return issues
 
