@@ -52,8 +52,9 @@ MAX_RESPONSE_LENGTH = 1200
 MAX_CONTEXT_ROWS = 10
 # Leave enough output budget for complete responses, including model thinking tokens.
 MAX_OUTPUT_TOKENS = 2048
-# Bound fallback work. A long list of models can multiply request latency.
-MAX_MODEL_ATTEMPTS = 2
+# Every unique configured model is attempted in priority order until one
+# returns a complete, validated answer. Each individual HTTP request remains
+# bounded by the reusable client's timeout configured below.
 CACHE_TTL_SECONDS = 300
 CACHE_MAX_ENTRIES = 128
 
@@ -738,9 +739,11 @@ Return only the business insight."""
         failures: list[str] = []
         last_status = "rejected"
 
-        # Try the primary model and at most one fallback. This prevents a
-        # long chain of slow/unavailable models from delaying every request.
-        for model in _configured_models()[:MAX_MODEL_ATTEMPTS]:
+        # Try every unique configured model in priority order. Move to the
+        # next model after timeout, rate limiting, server errors, unavailable
+        # models, malformed responses, or validation failures. Stop only when
+        # a model returns an accepted answer (or credentials are unauthorized).
+        for model in _configured_models():
             attempted_models.append(model)
             try:
                 response = _http_client.post(
